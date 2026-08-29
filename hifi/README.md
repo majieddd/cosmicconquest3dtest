@@ -85,6 +85,51 @@ What they caught (all real, all fixed):
   combat energy intact, nothing regressed vs house build. No reverts
   needed; no change applied.
 
+## USER CATCH-UP: the smooth wall
+
+The player noticed degradation where the earlier reviews had not: "models
+look worse... dismembered and completely broken up apart." Root cause
+confirmed with a boss diagnostic (colossus): the aggressive recipe's
+per-part random displacement + inset piles + studs FRAGMENTED rigid-part
+creatures (each part displaced independently split the joints; blobs
+became plate piles). Also the feet/leg boxes were being subdivided and
+bulged by the ring op ("boxes also not proper").
+
+THE RECIPE WAS REPLACED with a shape-safe one (guarded bevel + one trim
+belt on hulls ONLY; limbs/heads/decor untouched), re-baked, and visually
+re-verified: colossus coherent, roster whole, towers clean. The baked data
+fell from 10.9 MB to 5.5 MB (all the noise was the problem).
+
+## TEAM REVIEW #2 (fresh, on the evidence)
+
+Four reviewers again, on the safe-recipe build:
+
+- GEOMETRY (per model): CLEAN on all ten archetypes and all towers.
+  "No fragmentation anywhere... every creature reads as one coherent
+  silhouette." Small archetypes untouched and clean; harbinger clean;
+  towers + collars clean.
+- ANIMATION: two real symmetry defects. (1) vaneL/vaneR idle clip was
+  NOT anti-mirrored, and since playback is ADDITIVE over the game's own
+  anti-mirrored flyer pose, one wing's flap nearly canceled while the
+  other was boosted ~5x. (2) death-leg buckle "side" was dead code
+  (the 'i' in name test never matches legU0), so all legs rolled the
+  same direction. Both FIXED in build_clips.py; the fix_mirror hook now
+  enforces EXACT x-symmetry (verified to 1e-6 on vanes and mandibles,
+  diagonal 0.3/-0.3 on legs).
+- HARNESS: everything PASS (gate 79/79 + 48/48 at 5.53 MB, palette
+  byte-identical, gameplay files unchanged except hifiApply, em dash
+  clean, tw file carries no denizens key). One flagged item:
+  two runs' 00-board.png hashes differ. Investigation: the HOUSE build's
+  screenshots differ run-to-run identically (animated film grain is
+  seed/timing-based by design) and the game's state snapshots are
+  byte-identical across fresh runs - the determinism law (sim state)
+  holds; the pixel hash is not a valid determinism test.
+- JUDGE: KEEP hi-fi, 48 vs house 39. Animation clips decisive (2 vs 9);
+  five visual categories marginally on par (37 vs 39). The judge's one
+  caution: keep the warm gold accent on tower caps and the cold violet
+  as creature under-light (capture framing, not a code defect - the
+  palette files are byte-identical to the house build).
+
 ## Laws held
 
 - Faction palettes: LOCKED (diffed against the house build).
