@@ -9761,12 +9761,11 @@ var GAME = (function () {
       R.ART.ambient = 0.34;
       R.ART.shadowLift = 0.31;
       R.ART.planetFill = 0.62;
-      /* THE RETINA CAP. At very large backing resolutions the normal shading
-         path blackens out at survey distances (measured: mesh lit [245] in
-         debug, black in normal shading, and PERFECT at half backing - the
-         blackout scales with backing, not with geometry). Planet boards cap
-         the render scale at 0.85 so the largest common retina backing stays
-         in the proven-good range. Flat boards keep the full 1.0. */
+      /* RETINA MARGIN. On real Metal hardware the max-survey zoom blackens
+         out; the boundary was measured between 0.62 and 0.85 scale and the
+         cap at 0.85 keeps the common window in the proven range. (A 0.62
+         cap did not cure the survey case; it only cost sharpness - this
+         defect is tracked separately below.) */
       R.quality.scale = Math.min(R.quality.scale, 0.85);
       R.adaptive.max = 0.85;
       /* THE DIORAMA SHADOW LAW. The sun follows the camera on a globe, so
