@@ -9880,7 +9880,7 @@ var GAME = (function () {
       var pv = G && G.board && G.board.surf;
       var hi = (cam.fitDist || 160) * 1.15;
       var lo = 26;
-      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 2.9; }
+      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 2.2; }
       else if (pv) { lo = Math.max(26, pv.radius * 1.15); hi = Math.max(hi, pv.radius * 1.6); }
       cam.targetDist = U.clamp(cam.targetDist * (1 + Math.sign(e.deltaY) * 0.10), lo, hi);
     }, { passive: false });
@@ -9918,7 +9918,7 @@ var GAME = (function () {
         if (touchDist > 0) {
           var pv2 = G && G.board && G.board.surf;
           var hi2 = (cam.fitDist || 160) * 1.15, lo2 = 26;
-          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 2.9; }
+          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 2.2; }
           cam.targetDist = U.clamp(cam.targetDist * (touchDist / d), lo2, hi2);
         }
         touchDist = d;
