@@ -2275,6 +2275,13 @@ var SH = (function () {
     'uniform vec3  uShadowColor;',
     'uniform vec3  uLightColor;',
     'uniform float uShadowLift;',
+    /* PLANET BOOST. A planet board faces a night/camera hemisphere the flat
+       boards never see, so the ramp's lit and mid stops run brighter on curved
+       boards (correct exposure AND more facet contrast at once). Gated by
+       ART.planetBoost, which GAME.start sets to 0 on flat boards, so the flat
+       plates get exactly the original mid/lite values (uPlanetBoost = 0 hits
+       the old constants below). */
+    'uniform float uPlanetBoost;',
     '',
     'float posterise(float ndl, float seed){',
     /* Wrap lighting: remap -1..1 to 0..1 rather than clamping at zero. The
@@ -2318,20 +2325,12 @@ var SH = (function () {
        which is what "brighter" actually means for a painting whose drawing is
        carried by its darks. */
     '  vec3 deep = mix(uShadowColor, albedo * 0.24, uShadowLift);',
-    '  vec3 mid  = albedo * 0.82;',
-    /* 1.42 CLIPPED. Measured on a lit board: the lane rendered luminance 153
-       and the ground 152, identical, because both albedos were driven past the
-       top of the tonemap and flattened against the ceiling. A ramp that clips
-       destroys exactly the separation it exists to create. 1.22 keeps the lit
-       band inside range so two different albedos stay two different values. */
-    /* THE LIT STOP AT 0.13, NOT 0.18. In a baseline pass on THE COIL the whole
-       board was measured at [128,100,191] against a source palette near
-       [#13233a] (luminance 8 percent): the ACES curve lifted the lit band by
-       about 1.6x and the picture read as a pastel quilt. Pushing the mix
-       further toward the albedo keeps the lit band inside the palette range,
-       so the plate can sit dark while the towers stay the brightest things
-       in their neighbourhood. */
-    '  vec3 lite = mix(albedo, uLightColor, 0.13) * 1.22;',
+    /* PLANET BOOST on the mid and lite stops. Raising the lit/mid stops while
+       leaving deep alone makes the picture brighter AND increases contrast:
+       the deep band stays put, so the gap between darks and lits widens. The
+       deep stop is NOT boosted because that is where the drawing lives. */
+    '  vec3 mid  = albedo * (0.82 + 0.30 * uPlanetBoost);',
+    '  vec3 lite = mix(albedo, uLightColor, 0.13) * (1.22 + 0.90 * uPlanetBoost);',
     '  return q < 0.5 ? mix(deep, mid, q * 2.0) : mix(mid, lite, (q - 0.5) * 2.0);',
     '}'
   ].join('\n');
@@ -3267,8 +3266,13 @@ var PAINT = (function () {
       rim: U.hsl2rgb([(hsl[0] + (opts.rimShift || 0.0)) % 1, 1.0, 0.66]),
       ambientSky: U.hsl2rgb([shadowHue - 0.06, 0.58, 0.30]),
       ambientGround: U.hsl2rgb([shadowHue + 0.05, 0.62, 0.14]),
-      skyTop: U.hsl2rgb([shadowHue - 0.02, 0.78, 0.095]),
-      skyBottom: U.hsl2rgb([shadowHue + 0.06, 0.66, 0.185]),
+      /* The void behind the world must not read as EMPTY. A dark-navy planet
+         floats in a sky that is only marginally lighter, so the moment the
+         camera faces the night side or empty space the frame collapses to a
+         single flat field. Lift the gradient enough that the silhouette and
+         the nebula read as a picture instead of a void. */
+      skyTop: U.hsl2rgb([shadowHue - 0.02, 0.76, 0.160]),
+      skyBottom: U.hsl2rgb([shadowHue + 0.06, 0.62, 0.310]),
       nebulaA: U.hsl2rgb([(hsl[0] + (opts.nebA || 0.0)) % 1, 0.86, 0.42]),
       nebulaB: U.hsl2rgb([(hsl[0] + (opts.nebB || 0.52)) % 1, 0.90, 0.52]),
       ink: U.hsl2rgb([shadowHue, 0.75, 0.035]),
@@ -3418,7 +3422,11 @@ var R = (function () {
     exposure: 1.00,
     saturation: 0.92,
     contrast: 1.16,
-    vignette: 0.44,
+    /* A heavy vignette was crushing the corners to pure black, which is the
+       single biggest contributor to the frame reading as an empty void the
+       instant the player drags toward the night side or open space. Keep the
+       pop in the centre but stop the edges from disappearing into nothing. */
+    vignette: 0.26,
     grain: 0.0,
     halftone: 0.0,
     canvas: 0.30,
@@ -3428,6 +3436,10 @@ var R = (function () {
     /* PLANET FILL: the camera-side key used on curved boards so the night
        hemisphere stays legible; 0 on flat boards (GAME.start switches). */
     planetFill: 0.0,
+    /* PLANET BOOST: how much the ramp's lit/mid stops lift on curved boards so
+       the camera-facing hemisphere reads bright AND faceted. 0 on flat boards
+       (GAME.start sets it), so the flat plates keep the stock ramp. */
+    planetBoost: 0.0,
     debugMode: 0
   };
 
@@ -3792,6 +3804,7 @@ var R = (function () {
     p.u3v('uAmbientGround', pal.ambientGround);
     p.u1f('uAmbient', ART.ambient);
     p.u1f('uPlanetFill', ART.planetFill || 0);
+    p.u1f('uPlanetBoost', ART.planetBoost || 0);
     p.u1f('uSpecStrength', ART.specStrength);
     p.u1f('uSpecPower', ART.specPower);
     p.u1f('uBands', ART.bands);
@@ -9758,9 +9771,16 @@ var GAME = (function () {
          whole hemisphere faces away and the flat-board value turned that
          side to silhouette. */
       R.sun.dir = [0.78, 0.30, 0.40];
-      R.ART.ambient = 0.34;
-      R.ART.shadowLift = 0.31;
-      R.ART.planetFill = 0.62;
+      R.ART.ambient = 0.36;
+      R.ART.shadowLift = 0.34;
+      R.ART.planetFill = 0.52;
+      /* PLANET COLOR BOOST. The camera-facing hemisphere of a globe is a night
+         face, so the ramp's lit/mid stops lift here (bright mean AND a wider
+         deep-to-lit gap => facet contrast), and exposure steps up for the
+         curved board only. Both are reset to the flat defaults in the else
+         branch, so flat plates are byte-for-byte unchanged. */
+      R.ART.planetBoost = 0.90;
+      R.ART.exposure = 1.14;
       /* RETINA MARGIN. On real Metal hardware the max-survey zoom blackens
          out; the boundary was measured between 0.62 and 0.85 scale and the
          cap at 0.85 keeps the common window in the proven range. (A 0.62
@@ -9786,6 +9806,8 @@ var GAME = (function () {
       R.ART.ambient = 0.28;
       R.ART.shadowLift = 0.30;
       R.ART.planetFill = 0.0;
+      R.ART.planetBoost = 0.0;
+      R.ART.exposure = 1.00;
       R.quality.shadows = true;
       R.adaptive.max = 1.0;
     }
@@ -9858,7 +9880,7 @@ var GAME = (function () {
       var pv = G && G.board && G.board.surf;
       var hi = (cam.fitDist || 160) * 1.15;
       var lo = 26;
-      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 3.6; }
+      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 2.9; }
       else if (pv) { lo = Math.max(26, pv.radius * 1.15); hi = Math.max(hi, pv.radius * 1.6); }
       cam.targetDist = U.clamp(cam.targetDist * (1 + Math.sign(e.deltaY) * 0.10), lo, hi);
     }, { passive: false });
@@ -9896,7 +9918,7 @@ var GAME = (function () {
         if (touchDist > 0) {
           var pv2 = G && G.board && G.board.surf;
           var hi2 = (cam.fitDist || 160) * 1.15, lo2 = 26;
-          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 3.6; }
+          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 2.9; }
           cam.targetDist = U.clamp(cam.targetDist * (touchDist / d), lo2, hi2);
         }
         touchDist = d;
@@ -10636,17 +10658,33 @@ var GAME = (function () {
        without this). */
     if (G.board.surf && G.chevronMesh) {
       var cy = G.time * 1.35;
-      for (var cd = 6; cd < G.board.path.length - 6; cd += 8) {
+      for (var cd = 6; cd < G.board.path.length - 6; cd += 6) {
         var cp2 = G.board.pathAt(cd);
         var cyaw = Math.atan2(cp2.dir[0], cp2.dir[2]);
-        var pulse = 0.30 + 0.45 * (0.5 + 0.5 * Math.sin(cy * 2 - cd * 0.5));
+        var pulse = 0.46 + 0.50 * (0.5 + 0.5 * Math.sin(cy * 2 - cd * 0.5));
         R.pushUnlit(G.chevronMesh,
-          surfM(cp2.pos[0], cp2.pos[1] + 0.55, cp2.pos[2], cyaw, 0.8, 0.8, 0.8),
-          { tint: pal.rim, alpha: pulse, additive: true, pulse: pulse * 0.5 });
+          surfM(cp2.pos[0], cp2.pos[1] + 0.55, cp2.pos[2], cyaw, 1.05, 1.05, 1.05),
+          { tint: pal.rim, alpha: pulse, additive: true, pulse: pulse * 0.6 });
       }
     }
     R.push(G.spawnMesh, surfM(sp[0], G.board.heightAt(sp[0], sp[2]) - 0.3, sp[2], 0, 1, 1, 1));
     R.push(G.goalMesh, surfM(gl[0], G.board.heightAt(gl[0], gl[2]) - 0.2, gl[2], 0, 1, 1, 1));
+
+    /* GOAL BEACON (curved boards). A tall additive light column rising off
+       the surface at the goal, so the objective stays findable from any
+       orbit. The eye picks a vertical light column out of a dark field far
+       faster than it finds a small mesh, which is exactly what the orbit
+       camera needs when the goal is on the far side or around the curve.
+       Width stays near the gameplay-beam range (0.09..0.22); anything wider
+       reads as a solid mountain instead of a shaft. */
+    if (G.board.surf) {
+      var gb = G.board.surf.world(gl[0], 0.6, gl[2]);
+      var gn = G.board.surf.normalAt(gl[0], gl[2]);
+      var gt = [gb[0] + gn[0] * 26, gb[1] + gn[1] * 26, gb[2] + gn[2] * 26];
+      var danger0 = 1 - G.lives / G.maxLives;
+      var ga = 0.30 + 0.20 * (0.5 + 0.5 * Math.sin(G.time * 1.7)) + danger0 * 0.20;
+      drawBeamFlat(gb, gt, danger0 > 0.5 ? [1, 0.3, 0.35] : pal.rim, 0.85, ga);
+    }
 
     /* The goal pulses harder as lives drop, which is a readable panic signal
        that costs nothing and needs no UI. */
