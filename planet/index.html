@@ -4279,10 +4279,12 @@ var TERRAIN = (function () {
       mode: 'band', radius: R,
       toUnit: function (x, z) {
         var lon = (x + halfW) / R - Math.PI;       /* wraps 0..2pi R */
-        /* FULL PHI: the plate runs pole to pole (+/-83 deg), not a narrow
-           equator belt. The player wants the reference terrain ALL OVER
-           the globe; a bare polar void ate clicks and read as broken. */
-        var lat = (z / Math.max(1, halfH)) * 1.45;
+        /* FULL PHI, POLE TO POLE. The plate runs to the exact poles (lat
+           +-pi/2), so the outermost row converges on the pole point and no
+           sliver of the body sphere is visible from any orbit. The 1.45
+           version left a 7-degree ring of 'core' at each pole - the player
+           read it as the inside of the planet. */
+        var lat = (z / Math.max(1, halfH)) * (Math.PI / 2);
         var c = Math.cos(lat);
         return [Math.sin(lon) * c, Math.sin(lat), Math.cos(lon) * c];
       },
@@ -4301,7 +4303,7 @@ var TERRAIN = (function () {
         var nx = u[0] / L, ny = u[1] / L, nz = u[2] / L;
         var lat = Math.asin(Math.max(-1, Math.min(1, ny)));
         var lon = Math.atan2(nx, nz);
-        return [(lon + Math.PI) * R - halfW, L - R, lat * Math.max(1, halfH) / 1.45];
+        return [(lon + Math.PI) * R - halfW, L - R, lat * Math.max(1, halfH) / (Math.PI / 2)];
       }
     };
   }
