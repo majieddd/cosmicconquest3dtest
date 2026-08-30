@@ -9786,8 +9786,12 @@ var GAME = (function () {
       R.ART.shadowLift = 0.34;
       R.ART.planetFill = 1.15;
       /* THE METAL BACKING CAP, armed for planet boards (see 05-render
-         resize: backing > ~1600 kills the opaque pass on real Metal). */
+         resize: backing > ~1600 kills the opaque pass on real Metal).
+         RESIZE IS FORCED NOW: the boot-time resize ran before maxW was set,
+         so arming the cap without re-sizing left the backing in the dead
+         zone (measured W 1814). */
       R.quality.maxW = 1600;
+      resize();
       /* PLANET COLOR BOOST. The camera-facing hemisphere of a globe is a night
          face, so the ramp's lit/mid stops lift here (bright mean AND a wider
          deep-to-lit gap => facet contrast), and exposure steps up for the
