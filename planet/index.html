@@ -711,6 +711,15 @@ html, body {
 }
 .startrow .btn { font-size: 14px; padding: 11px 24px; }
 
+/* PLANET EDITION map selector: two fronts, chosen state in the faction key. */
+.btn-radar {
+  flex: 1; text-align: left; justify-content: flex-start;
+  min-height: 54px; line-height: 1.5; font-size: 11px;
+  letter-spacing: 0.10em;
+}
+.btn-radar .faint { letter-spacing: 0.02em; font-size: 10px; }
+.btn-radar.sel { border-color: var(--accent); color: var(--accent); }
+
 .endstats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
@@ -10731,9 +10740,14 @@ var UI = (function () {
 
   var pending = {
     faction: 'human',
-    enemyFaction: 'robotic',
+    enemyFaction: 'xeno',
     commander: 'vanta',
-    board: 3,
+    /* PLANET EDITION: the authored op is the planet datum; the selector on
+       the start screen switches map 0 (MERIDIAN) / 1 (CIRCUMFERENCE).
+       (Default was 3: the Coil index in the OLD board order - which now
+       resolves to THE SPINE, a house board. The planet URL was launching
+       the house. Caught by the user's screenshot.) */
+    board: 0,
     difficulty: 1
   };
 
@@ -10801,23 +10815,46 @@ var UI = (function () {
        the automation surface, but the player enters through a specific scene
        with a reason for the towers, the route and the enemy to exist. */
     var head = mk('div', 'mission-head');
-    head.appendChild(mk('div', 'mission-kicker', 'ARCHIVE WAR // 21'));
-    head.appendChild(mk('h1', 'title', 'COSMIC CONQUEST<br><span class="thin">THE COIL</span>'));
+    head.appendChild(mk('div', 'mission-kicker', 'PLANET DATUM // 21'));
+    head.appendChild(mk('h1', 'title', 'COSMIC CONQUEST<br><span class="thin">THE PLANET WAR</span>'));
     head.appendChild(mk('p', 'tagline',
-      'Contain a continuity surge inside the Levelland cooling loop. The plant is still feeding the grid. Do not let it feed the intrusion.'));
+      'The route lies on the curve of a world. Contain the continuity surge before it encircles the datum: a mile of painted surface, one winding conduit.'));
     sheet.appendChild(head);
 
     var brief = mk('div', 'mission-brief');
     brief.innerHTML =
-      '<div class="mission-mark">LC</div>' +
+      '<div class="mission-mark">PD</div>' +
       '<div class="mission-copy">' +
         '<div class="grouplabel">LIVE BRIEF</div>' +
         '<div class="mission-line"><span>COMMAND</span><b>GRIDWARDEN NYX</b></div>' +
         '<div class="mission-line"><span>THREAT</span><b>OLD WEATHER CONTINUITY</b></div>' +
-        '<div class="mission-line"><span>OBJECTIVE</span><b>HOLD THE REACTOR CORE</b></div>' +
-        '<p class="mission-note">The route returns through its own coolant rings. Place crossfire where a frame is forced to show the same side twice.</p>' +
+        '<div class="mission-line"><span>OBJECTIVE</span><b>HOLD THE RIM CONDUIT</b></div>' +
+        '<p class="mission-note">Drag to orbit a curved world; shoot along the surface, because the shortest line between two points on a planet runs through the planet. Pick your battleground below.</p>' +
       '</div>';
     sheet.appendChild(brief);
+
+    /* MAP SELECT: the two planet fronts. */
+    var sel = mk('div', 'startrow');
+    sel.style.marginTop = '0.2em';
+    var planetMaps = [DATA.BOARDS[0], DATA.BOARDS[1]];
+    for (var mi = 0; mi < planetMaps.length; mi++) {
+      (function (idx, bd) {
+        var card = mk('button', 'btn btn-radar' + (pending.board === idx ? ' sel' : ''), '');
+        card.type = 'button';
+        card.style.flex = '1';
+        card.innerHTML = '<b>' + bd.name + '</b><br><span class="faint">' +
+          (idx === 0 ? 'wide curved plate' : 'the whole globe') + '</span>';
+        card.onclick = function () {
+          pending.board = idx;
+          AUDIO.play('click');
+          var was = sel.querySelectorAll('.sel');
+          for (var w = 0; w < was.length; w++) was[w].classList.remove('sel');
+          card.classList.add('sel');
+        };
+        sel.appendChild(card);
+      })(mi, planetMaps[mi]);
+    }
+    sheet.appendChild(sel);
 
     var row = mk('div', 'startrow');
     var go = mk('button', 'btn btn-primary', 'ARM CONTAINMENT');
@@ -10848,7 +10885,9 @@ var UI = (function () {
     lastDockSig = ''; lastInspectSig = '';
     buildAbilities();
     refresh();
-    showBanner('COIL ARMED', 'CONTAIN THE FIRST SURGE', 2.2);
+    /* PLANET EDITION banner matches the chosen front. */
+    showBanner(pending.board === 1 ? 'CIRCUMFERENCE ARMED' : 'MERIDIAN ARMED',
+      pending.board === 1 ? 'CONTAIN THE FIRST SURGE' : 'HOLD THE CURVE', 2.2);
   }
 
   /* ---------- chrome ---------- */
