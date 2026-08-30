@@ -4274,12 +4274,15 @@ var TERRAIN = (function () {
     };
   }
 
-  function surfBand(R, halfW) {
+  function surfBand(R, halfW, halfH) {
     return {
       mode: 'band', radius: R,
       toUnit: function (x, z) {
         var lon = (x + halfW) / R - Math.PI;       /* wraps 0..2pi R */
-        var lat = (z / R) * 0.55;                   /* band height */
+        /* FULL PHI: the plate runs pole to pole (+/-83 deg), not a narrow
+           equator belt. The player wants the reference terrain ALL OVER
+           the globe; a bare polar void ate clicks and read as broken. */
+        var lat = (z / Math.max(1, halfH)) * 1.45;
         var c = Math.cos(lat);
         return [Math.sin(lon) * c, Math.sin(lat), Math.cos(lon) * c];
       },
@@ -4298,7 +4301,7 @@ var TERRAIN = (function () {
         var nx = u[0] / L, ny = u[1] / L, nz = u[2] / L;
         var lat = Math.asin(Math.max(-1, Math.min(1, ny)));
         var lon = Math.atan2(nx, nz);
-        return [(lon + Math.PI) * R - halfW, L - R, lat * R / 0.55];
+        return [(lon + Math.PI) * R - halfW, L - R, lat * Math.max(1, halfH) / 1.45];
       }
     };
   }
@@ -4337,7 +4340,7 @@ var TERRAIN = (function () {
     if (def.surface === 'cap') {
       surf = surfCap(def.surfaceRadius || 130, halfW, halfH);
     } else if (def.surface === 'band') {
-      surf = surfBand(def.surfaceRadius || 36, halfW);
+      surf = surfBand(def.surfaceRadius || 36, halfW, halfH);
     }
 
     /* Height field, sampled on grid CORNERS so adjacent quads share exact
@@ -8371,6 +8374,10 @@ var SIM = (function () {
     var B = G.board;
     if (Math.abs(x) > B.halfW - 2.4 || Math.abs(z) > B.halfH - 2.4) {
       return { ok: false, why: 'outside the plate' };
+    }
+    var hy = B.heightAt(x, z);
+    if (!isFinite(hy) || hy < -5) {
+      return { ok: false, why: 'no ground here' };
     }
     if (B.distToPath(x, z) < B.pathWidth * 0.9 + 1.7) {
       return { ok: false, why: 'too close to the lane' };
