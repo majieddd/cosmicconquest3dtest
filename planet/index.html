@@ -4322,15 +4322,26 @@ var TERRAIN = (function () {
   }
 
   function warpData(data, surf) {
-    /* One-time bake: vertices onto the sphere, vertices' normals toward the
-       RADIAL direction is wrong at rims but reads correctly for a planet:
-       the ground is the sphere, so surface normals are the sphere normals.
-       The per-facet seeds and colours ride along untouched. */
+    /* One-time bake: vertices onto the sphere; per-vertex normals are
+       ROTATED into the local surface frame (e_lon x e_r x e_lat) rather
+       than REPLACED by the smooth sphere normal. The sphere normal erases
+       the heightfield's per-facet variation, so the cel ramp quantises a
+       constant direction and the terrain reads as uniform blue-grey with
+       only the weave - that was the "missing layer" flatness at any orbit.
+       The relief stays; the patchwork comes back. */
     var v = data.verts;
+    var h = 0.05;
     for (var i = 0; i < v.length; i += 12) {
       var px = v[i], py = v[i + 1], pz = v[i + 2];
       var w = surf.world(px, py, pz);
-      var n = surf.normalAt(px, pz);
+      var r = surf.normalAt(px, pz);
+      var e1 = V.sub(surf.toUnit(px + h, pz), surf.toUnit(px - h, pz));
+      var e2 = V.sub(surf.toUnit(px, pz + h), surf.toUnit(px, pz - h));
+      e1 = V.norm(e1); e2 = V.norm(e2);
+      var n = [e1[0] * v[i + 3] + r[0] * v[i + 4] + e2[0] * v[i + 5],
+               e1[1] * v[i + 3] + r[1] * v[i + 4] + e2[1] * v[i + 5],
+               e1[2] * v[i + 3] + r[2] * v[i + 4] + e2[2] * v[i + 5]];
+      n = V.norm(n);
       v[i] = w[0]; v[i + 1] = w[1]; v[i + 2] = w[2];
       v[i + 3] = n[0]; v[i + 4] = n[1]; v[i + 5] = n[2];
     }
@@ -9750,6 +9761,14 @@ var GAME = (function () {
       R.ART.ambient = 0.34;
       R.ART.shadowLift = 0.31;
       R.ART.planetFill = 0.62;
+      /* THE DIORAMA SHADOW LAW. The sun follows the camera on a globe, so
+         the shadow map's viewpoint is the camera: the FAR hemisphere
+         occludes the NEAR one and blacks out exactly the face the player
+         looks at (limb lit, center dark). A globe has no single ground
+         plane to cast onto; the painted plate carries its own cell shadowing
+         and every body already has a contact disc, so sun-shadow is off on
+         curved boards and back on for flat ones. */
+      R.quality.shadows = false;
       /* FX particles are simulated in flat space; the renderer warps them
          onto the surface at submit time. */
       FX.surfaceWorld = function (px, py, pz) {
@@ -9760,6 +9779,7 @@ var GAME = (function () {
       R.ART.ambient = 0.28;
       R.ART.shadowLift = 0.30;
       R.ART.planetFill = 0.0;
+      R.quality.shadows = true;
     }
     R.sun.distance = Math.max(90, R.sun.extent * 2.1);
 
@@ -10791,7 +10811,16 @@ var GAME = (function () {
       ];
       R.cam.target = [cam.focus[0], cam.focus[1] + 1.5, cam.focus[2]];
     }
-    R.sun.dir = [0.34, 0.88, 0.42];
+
+    /* THE DIORAMA LAMP. On a curved board the sun follows the camera: the
+       face the player is looking at is always the lit face, like the small
+       map reference. A real star left a black hemispIT that the player
+       read as a missing layer, no matter how strong the fill. */
+    if (surf) {
+      R.sun.dir = V.norm([R.cam.pos[0], R.cam.pos[1], R.cam.pos[2]]);
+    } else {
+      R.sun.dir = [0.34, 0.88, 0.42];
+    }
   }
 
   /* Draw exactly one frame, synchronously, without touching the simulation.
