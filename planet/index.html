@@ -4404,8 +4404,13 @@ var TERRAIN = (function () {
         h += nz(wx, wz, 0.021) * 0.42;
         /* The board falls away at its rim so it reads as a plate floating in
            space rather than as a cropped infinite plane. */
+        /* PLANET LAW: a spherical board MUST NOT drop its rim - the lat edges
+           are the poles and the seam is a continuous circle; a 7-unit drop
+           sinks the plate into the body and shows the dark dodecahedron
+           through the gap (the globe's broken-edge look). A tiny tuck keeps
+           the poles meeting the body. */
         var edge = Math.max(Math.abs(wx) / halfW, Math.abs(wz) / halfH);
-        h -= U.smoothstep(0.82, 1.02, edge) * 7.0;
+        h -= U.smoothstep(0.82, 1.02, edge) * (surf ? 0.35 : 7.0);
         /* Carve the path: flatten toward zero within the ribbon, with a lip
            just outside it so the road reads as cut into the ground. */
         var carve = 1 - U.smoothstep(pathWidth * 0.55, pathWidth * 1.5, d);
@@ -9719,6 +9724,15 @@ var GAME = (function () {
       /* The sun volume must cover the whole planet, not the flat plate. */
       R.sun.extent = Math.max(R.sun.extent, G.board.surf.radius * 1.45 + 12);
       R.sun.distance = Math.max(90, R.sun.extent * 2.1);
+      /* PLANET LIGHTING. A sky-high sun lights the north pole and leaves the
+         equatorial combat belt in shadow. A low sun along the equator puts
+         the WAR on the lit side; the poles go shadow, which is exactly the
+         read a painted planet wants. The dark side still carries the plate's
+         ambient lift, and ambient is raised for curved boards because a
+         whole hemisphere faces away and the flat-board value turned that
+         side to silhouette. */
+      R.sun.dir = [0.78, 0.30, 0.40];
+      R.ART.ambient = 0.40;
       /* FX particles are simulated in flat space; the renderer warps them
          onto the surface at submit time. */
       FX.surfaceWorld = function (px, py, pz) {
@@ -9726,6 +9740,7 @@ var GAME = (function () {
       };
     } else {
       FX.surfaceWorld = null;
+      R.ART.ambient = 0.28;
     }
     R.sun.distance = Math.max(90, R.sun.extent * 2.1);
 
@@ -9756,16 +9771,26 @@ var GAME = (function () {
 
   /* ---------- input ---------- */
 
+  /* PITCH RANGE PER MODE. A flat board stays top-down-ish; a globe must be
+     orbitable from the equator to the pole to review the whole war. */
+  function pitchLimits() {
+    var pv = G && G.board && G.board.surf;
+    if (pv && pv.mode === 'band') return [0.03, 1.05];
+    if (pv) return [0.22, 1.05];
+    return [0.42, 1.32];
+  }
+
   function bindInput() {
     canvas.addEventListener('mousemove', function (e) {
       input.mx = e.clientX; input.my = e.clientY;
       if (input.down) {
         var dx = e.clientX - input.lastX, dy = e.clientY - input.lastY;
         input.dragDist += Math.abs(dx) + Math.abs(dy);
-        if (input.dragDist > 5) input.dragging = true;
+        if (input.dragDist > 8) input.dragging = true;
         if (input.dragging) {
-          cam.targetYaw -= dx * 0.005;
-          cam.targetPitch = U.clamp(cam.targetPitch + dy * 0.004, 0.42, 1.32);
+          cam.targetYaw -= dx * 0.006;
+          var pl2 = pitchLimits();
+          cam.targetPitch = U.clamp(cam.targetPitch + dy * 0.005, pl2[0], pl2[1]);
         }
       }
       input.lastX = e.clientX; input.lastY = e.clientY;
@@ -9813,7 +9838,8 @@ var GAME = (function () {
         if (input.dragDist > 8) input.dragging = true;
         if (input.dragging) {
           cam.targetYaw -= dx * 0.006;
-          cam.targetPitch = U.clamp(cam.targetPitch + dy * 0.005, 0.42, 1.32);
+          var pl = pitchLimits();
+          cam.targetPitch = U.clamp(cam.targetPitch + dy * 0.005, pl[0], pl[1]);
         }
         input.lastX = e.touches[0].clientX; input.lastY = e.touches[0].clientY;
         input.mx = input.lastX; input.my = input.lastY;
