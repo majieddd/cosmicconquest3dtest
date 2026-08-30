@@ -3371,7 +3371,7 @@ var R = (function () {
   var opaqueN = 0, transparentN = 0, particleN = 0;
 
   var pal = null;
-  var quality = { bloom: true, shadows: true, ink: true, shadowSize: 2048, scale: 1.0 };
+  var quality = { bloom: true, shadows: true, ink: true, shadowSize: 2048, scale: 1.0, maxW: 0 };
 
   /* ---------- ART CONSTANTS ----------
      Every number that decides what the picture LOOKS like, in one block, so
@@ -3596,6 +3596,17 @@ var R = (function () {
     adapt.cssW = w; adapt.cssH = h;
     W = Math.max(2, Math.round(w * DPR * quality.scale));
     H = Math.max(2, Math.round(h * DPR * quality.scale));
+    /* THE METAL BACKING CAP. On real Apple-Metal hardware the opaque pass
+       stops drawing once the framebuffer width passes ~1600px (measured at
+       every stage: W 2268 = void, W 1200 = full scene, identical camera,
+       zero errors; SwiftShader renders any size). Planet boards set
+       quality.maxW in GAME.start so the backing never enters the dead zone;
+       flat boards keep their full-resolution path. */
+    if (quality.maxW && W > quality.maxW) {
+      quality.scale *= quality.maxW / W;
+      W = Math.max(2, Math.round(w * DPR * quality.scale));
+      H = Math.max(2, Math.round(h * DPR * quality.scale));
+    }
     canvas.width = Math.max(2, Math.round(w * DPR));
     canvas.height = Math.max(2, Math.round(h * DPR));
     canvas.style.width = w + 'px';
@@ -9773,7 +9784,10 @@ var GAME = (function () {
       R.sun.dir = [0.78, 0.30, 0.40];
       R.ART.ambient = 0.36;
       R.ART.shadowLift = 0.34;
-      R.ART.planetFill = 0.52;
+      R.ART.planetFill = 1.15;
+      /* THE METAL BACKING CAP, armed for planet boards (see 05-render
+         resize: backing > ~1600 kills the opaque pass on real Metal). */
+      R.quality.maxW = 1600;
       /* PLANET COLOR BOOST. The camera-facing hemisphere of a globe is a night
          face, so the ramp's lit/mid stops lift here (bright mean AND a wider
          deep-to-lit gap => facet contrast), and exposure steps up for the
@@ -9810,6 +9824,7 @@ var GAME = (function () {
       R.ART.exposure = 1.00;
       R.quality.shadows = true;
       R.adaptive.max = 1.0;
+      R.quality.maxW = 0;
     }
     R.sun.distance = Math.max(90, R.sun.extent * 2.1);
 
@@ -10858,15 +10873,14 @@ var GAME = (function () {
       R.cam.target = [cam.focus[0], cam.focus[1] + 1.5, cam.focus[2]];
     }
 
-    /* THE DIORAMA LAMP. On a curved board the sun follows the camera: the
-       face the player is looking at is always the lit face, like the small
-       map reference. A real star left a black hemispIT that the player
-       read as a missing layer, no matter how strong the fill. */
-    if (surf) {
-      R.sun.dir = V.norm([R.cam.pos[0], R.cam.pos[1], R.cam.pos[2]]);
-    } else {
-      R.sun.dir = [0.34, 0.88, 0.42];
-    }
+    /* FIXED SUN. The lamp (sun following the camera) made every STATIC frame
+       pretty and every MOVING frame unstable: each frame of drag re-lit the
+       whole scene, the cel bands flip-flopped, and intermediate camera states
+       broke out (the player: 'the moment you move it messes up'). The plates
+       are painted with a fixed sun; the globe keeps a fixed sun and the night
+       side is carried by planetBoost + planetFill + ambient (all gated to
+       curved boards). */
+    R.sun.dir = surf ? [0.78, 0.30, 0.40] : [0.34, 0.88, 0.42];
   }
 
   /* Draw exactly one frame, synchronously, without touching the simulation.
