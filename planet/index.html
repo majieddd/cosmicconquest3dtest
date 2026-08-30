@@ -2490,12 +2490,20 @@ var SH = (function () {
     '  }',
     '',
     '  float ndl = dot(N, L);',
+    /* PLANET FILL. On a curved board the player permanently faces a night
+       hemisphere; the night side must still read as painted terrain, not as
+       black planes. The fill enters the LIGHTING TERM (before the
+       posteriser) so the camera-facing side runs through the palette's
+       bands with its per-facet jitter intact. (An earlier additive fill
+       multiplied a dark albedo into near-invisibility and the night face
+       stayed a hole.) */
+    '  float ndlL = clamp(ndl + uPlanetFill * max(0.0, dot(N, Vd)), -1.0, 1.0);',
     '  float sh = mix(1.0, shadowVis(), uShadowStrength);',
     /* The shadow is folded into the lighting term BEFORE quantising, so a
        shadowed facet steps down a whole band rather than being darkened
        smoothly. That keeps the cel edge intact inside shadows, which is where
        most cel-shaded renderers give themselves away. */
-    '  float lit = posterise(ndl * mix(0.25, 1.0, sh), vSeed);',
+    '  float lit = posterise(ndlL * mix(0.25, 1.0, sh), vSeed);',
     '  lit = min(lit, uItemC.x);',
     '  vec3 col = rampColor(lit, vAlbedo);',
     '',
@@ -2506,12 +2514,6 @@ var SH = (function () {
        spent here is contrast taken out of the picture. */
     '  float hemi = N.y * 0.5 + 0.5;',
     '  col += vAlbedo * mix(uAmbientGround, uAmbientSky, hemi) * uAmbient;',
-    /* PLANET FILL. On a curved board the player permanently faces a night
-       hemisphere: without a camera-side fill that side collapses into flat
-       black planes and the terrain looks unrendered (the player read it as
-       "a missing layer"). A soft key from the camera direction makes the
-       facing side always legible; the sun still owns the drama. */
-    '  col += vAlbedo * uPlanetFill * max(0.0, dot(N, Vd));',
     '',
     /* Paint tooth. Modulates value only, never hue, so it reads as the canvas
        under the paint rather than as dirt on top of it. */
@@ -9745,9 +9747,9 @@ var GAME = (function () {
          whole hemisphere faces away and the flat-board value turned that
          side to silhouette. */
       R.sun.dir = [0.78, 0.30, 0.40];
-      R.ART.ambient = 0.50;
-      R.ART.shadowLift = 0.33;
-      R.ART.planetFill = 0.42;
+      R.ART.ambient = 0.34;
+      R.ART.shadowLift = 0.31;
+      R.ART.planetFill = 0.62;
       /* FX particles are simulated in flat space; the renderer warps them
          onto the surface at submit time. */
       FX.surfaceWorld = function (px, py, pz) {
