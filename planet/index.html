@@ -2410,6 +2410,7 @@ var SH = (function () {
     'uniform vec3 uAmbientSky;',
     'uniform vec3 uAmbientGround;',
     'uniform float uAmbient;',
+    'uniform float uPlanetFill;',
     'uniform float uSpecStrength;',
     'uniform float uSpecPower;',
     'uniform sampler2DShadow uShadow;',
@@ -2505,6 +2506,12 @@ var SH = (function () {
        spent here is contrast taken out of the picture. */
     '  float hemi = N.y * 0.5 + 0.5;',
     '  col += vAlbedo * mix(uAmbientGround, uAmbientSky, hemi) * uAmbient;',
+    /* PLANET FILL. On a curved board the player permanently faces a night
+       hemisphere: without a camera-side fill that side collapses into flat
+       black planes and the terrain looks unrendered (the player read it as
+       "a missing layer"). A soft key from the camera direction makes the
+       facing side always legible; the sun still owns the drama. */
+    '  col += vAlbedo * uPlanetFill * max(0.0, dot(N, Vd));',
     '',
     /* Paint tooth. Modulates value only, never hue, so it reads as the canvas
        under the paint rather than as dirt on top of it. */
@@ -3416,6 +3423,9 @@ var R = (function () {
     inkStrength: 1.20,
     inkNormalThreshold: 0.45,
     inkDepthThreshold: 0.68,
+    /* PLANET FILL: the camera-side key used on curved boards so the night
+       hemisphere stays legible; 0 on flat boards (GAME.start switches). */
+    planetFill: 0.0,
     debugMode: 0
   };
 
@@ -3779,6 +3789,7 @@ var R = (function () {
     p.u3v('uAmbientSky', pal.ambientSky);
     p.u3v('uAmbientGround', pal.ambientGround);
     p.u1f('uAmbient', ART.ambient);
+    p.u1f('uPlanetFill', ART.planetFill || 0);
     p.u1f('uSpecStrength', ART.specStrength);
     p.u1f('uSpecPower', ART.specPower);
     p.u1f('uBands', ART.bands);
@@ -9734,7 +9745,9 @@ var GAME = (function () {
          whole hemisphere faces away and the flat-board value turned that
          side to silhouette. */
       R.sun.dir = [0.78, 0.30, 0.40];
-      R.ART.ambient = 0.40;
+      R.ART.ambient = 0.50;
+      R.ART.shadowLift = 0.33;
+      R.ART.planetFill = 0.42;
       /* FX particles are simulated in flat space; the renderer warps them
          onto the surface at submit time. */
       FX.surfaceWorld = function (px, py, pz) {
@@ -9743,6 +9756,8 @@ var GAME = (function () {
     } else {
       FX.surfaceWorld = null;
       R.ART.ambient = 0.28;
+      R.ART.shadowLift = 0.30;
+      R.ART.planetFill = 0.0;
     }
     R.sun.distance = Math.max(90, R.sun.extent * 2.1);
 
