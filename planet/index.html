@@ -4851,12 +4851,16 @@ var TERRAIN = (function () {
     }
 
     /* ---------- the planet body ----------
-       The ground is a band or cap OF the sphere; without a body beneath it
-       the planet reads as a floating ring and the polar caps are empty
-       sky. A dark low-poly sphere sits 0.35 under the play surface: the
-       plate rims (which fall away) tuck into it and close the globe. */
+       A cap covers only part of its sphere, so it needs a dark inner body to
+       close the world beneath the playable plate. The full band already
+       reaches both poles and wraps the entire sphere. Giving that closed
+       surface another sphere underneath is actively wrong: each curved
+       terrain triangle is a flat chord, and the inner sphere can protrude
+       through its middle even when every terrain vertex is higher. That was
+       the smooth blue "under the top layer" shell hiding the globe's painted
+       facets. Full-globe terrain is its own complete body. */
     var planetBody = null;
-    if (surf) {
+    if (surf && surf.mode === 'cap') {
       var bb = MESH.builder('planet-body:' + seed);
       bb.color(def.surfaceBodyCol || '#0d121c').tooth(1.0);
       bb.ico(Math.max(6, surf.radius - 0.55), 1);
