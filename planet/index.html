@@ -4009,6 +4009,14 @@ var R = (function () {
       markStart('shadow'); shadowPass(); markEnd('shadow');
 
       rt.main.bind();
+      /* DEPTH CLEAR IS STATEFUL. The composite pass ends every frame with
+         depth writes disabled. WebGL clear() honours that write mask, so
+         clearing before restoring it left the previous camera frame in the
+         depth renderbuffer. A stationary view happened to pass LEQUAL and
+         looked correct; orbiting exposed the stale buffer as whole terrain
+         facets popping in and out. Restore the mask at the frame boundary so
+         every camera position starts from a genuinely empty depth buffer. */
+      gl.depthMask(true);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       markStart('sky'); skyPass(); markEnd('sky');
