@@ -1901,6 +1901,43 @@ var MESH = (function () {
       return B;
     };
 
+    /* A painted geodesic shell. A latitude-longitude grid is fine for maps
+       that stop before the poles, but a full globe collapses every longitude
+       edge into two points. That creates a sixty-spoke pinwheel and makes the
+       terrain look like a stretched texture. This keeps the same low-poly
+       language with near-even facets across the whole sphere. The callbacks
+       let the board retain its authored height field and per-facet paint. */
+    B.paintedIco = function (r, subdiv, heightAtUnit, paintAtUnit) {
+      var verts = ICO_V.map(function (v) { return V.norm(v); });
+      var faces = ICO_F.map(function (f) { return [verts[f[0]], verts[f[1]], verts[f[2]]]; });
+      for (var s = 0; s < (subdiv || 0); s++) {
+        var next = [];
+        for (var i = 0; i < faces.length; i++) {
+          var f = faces[i];
+          var ab = V.norm(V.add(f[0], f[1]));
+          var bc = V.norm(V.add(f[1], f[2]));
+          var ca = V.norm(V.add(f[2], f[0]));
+          next.push([f[0], ab, ca], [ab, f[1], bc], [ca, bc, f[2]], [ab, bc, ca]);
+        }
+        faces = next;
+      }
+      function onShell(u) {
+        return V.scale(u, r + (heightAtUnit ? heightAtUnit(u) : 0));
+      }
+      for (var k = 0; k < faces.length; k++) {
+        var face = faces[k];
+        var centre = V.norm(V.add(V.add(face[0], face[1]), face[2]));
+        var paint = paintAtUnit ? paintAtUnit(centre, k) : null;
+        if (paint) {
+          B.color(paint.color);
+          B.tooth(paint.tooth === undefined ? 1.0 : paint.tooth);
+          B.emissive(paint.emissive || 0);
+        }
+        tri(onShell(face[0]), onShell(face[1]), onShell(face[2]));
+      }
+      return B;
+    };
+
     /* A crystal shard: two cones back to back with an offset waist. Xeno and
        Light hardware is built almost entirely from these. */
     B.shard = function (r, hUp, hDown, sides, waistY) {
@@ -3418,6 +3455,11 @@ var R = (function () {
     bloomThreshold: 0.66,
     bloomStrength: 0.72,
     bandCap: 0.72,
+    /* The full globe keeps its terrain below the pale highlight band. At
+       survey distance that band covers hundreds of facets at once and washes
+       the authored blue paint into a white shell. The lane remains lighter
+       through its own palette, so this restores texture without hiding play. */
+    globeBandCap: 0.50,
     decorBandCap: 0.82,
     exposure: 1.00,
     saturation: 0.92,
@@ -4479,6 +4521,25 @@ var TERRAIN = (function () {
       }
     }
 
+    /* A full globe has one seam and two pole points, even though the flat
+       authoring grid has two seam columns and sixty samples on each pole row.
+       Make those duplicate coordinates agree before any render or placement
+       code samples them. This closes sub-pixel cracks during orbit and keeps
+       the radial displacement single-valued at the poles. */
+    if (surf && surf.mode === 'band') {
+      for (j = 0; j < HH; j++) {
+        var seamA = j * HW, seamB = seamA + GW;
+        var seamH = (height[seamA] + height[seamB]) * 0.5;
+        height[seamA] = height[seamB] = seamH;
+      }
+      for (var poleRow = 0; poleRow <= GH; poleRow += GH) {
+        var poleSum = 0;
+        for (i = 0; i < GW; i++) poleSum += height[poleRow * HW + i];
+        var poleH = poleSum / GW;
+        for (i = 0; i < HW; i++) height[poleRow * HW + i] = poleH;
+      }
+    }
+
     function heightAt(wx, wz) {
       var fx = (wx + halfW) / CS, fz = (wz + halfH) / CS;
       var x0 = Math.floor(fx), z0 = Math.floor(fz);
@@ -4525,50 +4586,83 @@ var TERRAIN = (function () {
 
     var gb = MESH.builder('ground:' + seed);
     gb.tooth(1.0);
-    for (j = 0; j < GH; j++) {
-      for (i = 0; i < GW; i++) {
-        var i00 = j * HW + i, i10 = j * HW + i + 1;
-        var i01 = (j + 1) * HW + i, i11 = (j + 1) * HW + i + 1;
-        var x0 = -halfW + i * CS, x1 = x0 + CS;
-        var z0 = -halfH + j * CS, z1 = z0 + CS;
-        var pd = (pdist[i00] + pdist[i10] + pdist[i01] + pdist[i11]) * 0.25;
-        var onPath = pd < pathWidth * 1.05;
 
+    if (surf && surf.mode === 'band') {
+      function bandFlatAt(u) {
+        var lon = Math.atan2(u[0], u[2]);
+        var lat = Math.asin(U.clamp(u[1], -1, 1));
+        return [(lon + Math.PI) * surf.radius - halfW,
+                lat * halfH / (Math.PI / 2)];
+      }
+      function bandHeightAt(u) {
+        var p = bandFlatAt(u);
+        var eps = 1e-4;
+        return heightAt(U.clamp(p[0], -halfW + eps, halfW - eps),
+                        U.clamp(p[1], -halfH + eps, halfH - eps));
+      }
+      function bandPaintAt(u) {
+        var p = bandFlatAt(u);
+        var onPath = distToPath(path, p[0], p[1]) < pathWidth * 1.05;
         var r = rnd();
         var col = onPath
           ? pathCols[Math.floor(r * pathCols.length) % pathCols.length]
           : groundCols[Math.floor(r * groundCols.length) % groundCols.length];
         var base = U.hex2rgb(col);
-        gb.tooth(onPath ? 0.75 : 1.0);
-
-        var p00 = [x0 + jitX[i00], height[i00], z0 + jitZ[i00]];
-        var p10 = [x1 + jitX[i10], height[i10], z0 + jitZ[i10]];
-        var p01 = [x0 + jitX[i01], height[i01], z1 + jitZ[i01]];
-        var p11 = [x1 + jitX[i11], height[i11], z1 + jitZ[i11]];
-
-        /* COLOUR PER TRIANGLE, NOT PER CELL.
-           Giving both triangles of a quad the same colour makes the board read
-           as square TILES, which is a floor, not a painting. A knife lays down
-           one stroke at a time and no two carry quite the same mix, so each
-           triangle takes the cell's base colour with a small independent shift.
-           Keeping the base per cell is what stops it dissolving into noise: the
-           result is coherent patches with visible internal brushwork, which is
-           what the reference plates actually do. */
-        function stroke() {
-          gb.color(U.shift(base,
+        return {
+          color: U.shift(base,
             (rnd() - 0.5) * 0.022,
             (rnd() - 0.5) * 0.14,
-            (rnd() - 0.5) * 0.075));
-        }
-        /* Alternate the diagonal per cell. A uniform diagonal across a whole
-           grid produces a visible corduroy running the length of the board,
-           which is one of the classic tells of a generated heightfield. */
-        if ((i + j) & 1) {
-          stroke(); gb.tri(p00, p11, p10);
-          stroke(); gb.tri(p00, p01, p11);
-        } else {
-          stroke(); gb.tri(p00, p01, p10);
-          stroke(); gb.tri(p10, p01, p11);
+            (rnd() - 0.5) * 0.075),
+          tooth: onPath ? 0.75 : 1.0
+        };
+      }
+      gb.paintedIco(surf.radius, 4, bandHeightAt, bandPaintAt);
+    } else {
+      for (j = 0; j < GH; j++) {
+        for (i = 0; i < GW; i++) {
+          var i00 = j * HW + i, i10 = j * HW + i + 1;
+          var i01 = (j + 1) * HW + i, i11 = (j + 1) * HW + i + 1;
+          var x0 = -halfW + i * CS, x1 = x0 + CS;
+          var z0 = -halfH + j * CS, z1 = z0 + CS;
+          var pd = (pdist[i00] + pdist[i10] + pdist[i01] + pdist[i11]) * 0.25;
+          var onPath = pd < pathWidth * 1.05;
+
+          var r = rnd();
+          var col = onPath
+            ? pathCols[Math.floor(r * pathCols.length) % pathCols.length]
+            : groundCols[Math.floor(r * groundCols.length) % groundCols.length];
+          var base = U.hex2rgb(col);
+          gb.tooth(onPath ? 0.75 : 1.0);
+
+          var p00 = [x0 + jitX[i00], height[i00], z0 + jitZ[i00]];
+          var p10 = [x1 + jitX[i10], height[i10], z0 + jitZ[i10]];
+          var p01 = [x0 + jitX[i01], height[i01], z1 + jitZ[i01]];
+          var p11 = [x1 + jitX[i11], height[i11], z1 + jitZ[i11]];
+
+          /* COLOUR PER TRIANGLE, NOT PER CELL.
+             Giving both triangles of a quad the same colour makes the board read
+             as square TILES, which is a floor, not a painting. A knife lays down
+             one stroke at a time and no two carry quite the same mix, so each
+             triangle takes the cell's base colour with a small independent shift.
+             Keeping the base per cell is what stops it dissolving into noise: the
+             result is coherent patches with visible internal brushwork, which is
+             what the reference plates actually do. */
+          function stroke() {
+            gb.color(U.shift(base,
+              (rnd() - 0.5) * 0.022,
+              (rnd() - 0.5) * 0.14,
+              (rnd() - 0.5) * 0.075));
+          }
+          /* Alternate the diagonal per cell. A uniform diagonal across a whole
+             grid produces a visible corduroy running the length of the board,
+             which is one of the classic tells of a generated heightfield. */
+          if ((i + j) & 1) {
+            stroke(); gb.tri(p00, p11, p10);
+            stroke(); gb.tri(p00, p01, p11);
+          } else {
+            stroke(); gb.tri(p00, p01, p10);
+            stroke(); gb.tri(p10, p01, p11);
+          }
         }
       }
     }
@@ -4846,7 +4940,7 @@ var TERRAIN = (function () {
 
     /* ---------- planet warp (bake) ---------- */
     if (surf) {
-      warpData(groundData, surf);
+      if (surf.mode !== 'band') warpData(groundData, surf);
       if (decorData) warpData(decorData, surf);
     }
 
@@ -9794,9 +9888,10 @@ var GAME = (function () {
          whole hemisphere faces away and the flat-board value turned that
          side to silhouette. */
       R.sun.dir = [0.78, 0.30, 0.40];
-      R.ART.ambient = 0.36;
+      var fullGlobe = G.board.surf.mode === 'band';
+      R.ART.ambient = fullGlobe ? 0.40 : 0.36;
       R.ART.shadowLift = 0.34;
-      R.ART.planetFill = 1.15;
+      R.ART.planetFill = fullGlobe ? 0.55 : 1.15;
       /* THE METAL BACKING CAP, armed for planet boards (see 05-render
          resize: backing > ~1600 kills the opaque pass on real Metal).
          RESIZE IS FORCED NOW: the boot-time resize ran before maxW was set,
@@ -9809,8 +9904,8 @@ var GAME = (function () {
          deep-to-lit gap => facet contrast), and exposure steps up for the
          curved board only. Both are reset to the flat defaults in the else
          branch, so flat plates are byte-for-byte unchanged. */
-      R.ART.planetBoost = 0.90;
-      R.ART.exposure = 1.14;
+      R.ART.planetBoost = fullGlobe ? 0.15 : 0.90;
+      R.ART.exposure = fullGlobe ? 1.04 : 1.14;
       /* RETINA MARGIN. On real Metal hardware the max-survey zoom blackens
          out; the boundary was measured between 0.62 and 0.85 scale and the
          cap at 0.85 keeps the common window in the proven range. (A 0.62
@@ -9911,7 +10006,7 @@ var GAME = (function () {
       var pv = G && G.board && G.board.surf;
       var hi = (cam.fitDist || 160) * 1.15;
       var lo = 26;
-      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 2.2; }
+      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 3.6; }
       else if (pv) { lo = Math.max(26, pv.radius * 1.15); hi = Math.max(hi, pv.radius * 1.6); }
       cam.targetDist = U.clamp(cam.targetDist * (1 + Math.sign(e.deltaY) * 0.10), lo, hi);
     }, { passive: false });
@@ -9949,7 +10044,7 @@ var GAME = (function () {
         if (touchDist > 0) {
           var pv2 = G && G.board && G.board.surf;
           var hi2 = (cam.fitDist || 160) * 1.15, lo2 = 26;
-          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 2.2; }
+          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 3.6; }
           cam.targetDist = U.clamp(cam.targetDist * (touchDist / d), lo2, hi2);
         }
         touchDist = d;
@@ -10668,7 +10763,9 @@ var GAME = (function () {
        camera dropped low, which is precisely when the player has zoomed in to
        look at something. Rim exists to separate a silhouette from its
        background; the ground IS the background. */
-    R.push(G.groundMesh, U.m4ident(), { castShadow: false, facetJitter: 0.26, rimScale: 0.18, bandCap: R.ART.bandCap });
+    var groundBandCap = G.board.surf && G.board.surf.mode === 'band'
+      ? R.ART.globeBandCap : R.ART.bandCap;
+    R.push(G.groundMesh, U.m4ident(), { castShadow: false, facetJitter: 0.26, rimScale: 0.18, bandCap: groundBandCap });
     /* The planet body sits UNDER the play surface and closes the globe. */
     if (G.planetBodyMesh) {
       R.push(G.planetBodyMesh, U.m4ident(), { castShadow: false, rimScale: 0.30, bandCap: R.ART.decorBandCap });
