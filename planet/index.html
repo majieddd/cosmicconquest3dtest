@@ -2466,7 +2466,10 @@ var SH = (function () {
        expressed as a quantised band index (0..1). A play surface wants to sit
        on mid or below so the lit band is reserved for the actors: a diorama
        lights its subjects, not its table. 1.0 (the default) means no cap, so
-       the branch costs one min on the quantised value. */
+       the branch costs one min on the quantised value. uItemC.y blends a
+       closed globe toward its continuous radial normal. Its paint remains
+       faceted, but its lighting no longer exposes the render topology as a
+       second shell. */
     'uniform vec4 uItemC;',
 
     '',
@@ -2510,6 +2513,7 @@ var SH = (function () {
     '',
     'void main(){',
     '  vec3 N = normalize(vNormal);',
+    '  if (uItemC.y > 0.5) N = normalize(vWorld);',
     '  vec3 Vd = normalize(uCamPos - vWorld);',
     '  vec3 L = normalize(uLightDir);',
     '',
@@ -3705,6 +3709,11 @@ var R = (function () {
        and scenery pass a cap below 1 so the lit band stays reserved for the
        towers and denizens: a diorama lights its subjects, not its table. */
     it.bandCap = (o && o.bandCap !== undefined) ? o.bandCap : 1;
+    /* A complete globe is one continuous object. Its authored paint cells are
+       flat colour strokes, but lighting them with each render triangle's face
+       normal reveals the mesh as a loose shell. Radial lighting keeps the
+       sphere coherent while leaving the colour and tooth texture untouched. */
+    it.sphereNormal = (o && o.sphereNormal !== undefined) ? o.sphereNormal : 0;
     /* PER-DRAW RIM STRENGTH.
        Rim light is scene light, so its COLOUR is the defender's key on every
        surface: the style law forbids two faction colours sharing a frame. Its
@@ -3891,7 +3900,7 @@ var R = (function () {
       p.u4f('uItemB', it.tintMix,
         it.facetJitter >= 0 ? it.facetJitter : ART.facetJitter,
         it.rimScale, ART.debugMode || 0);
-      p.u4f('uItemC', it.bandCap, 0, 0, 0);
+      p.u4f('uItemC', it.bandCap, it.sphereNormal, 0, 0);
       it.mesh.draw();
       prof.draws++;
     }
@@ -4588,34 +4597,51 @@ var TERRAIN = (function () {
     gb.tooth(1.0);
 
     if (surf && surf.mode === 'band') {
+      /* The sphere keeps geodesic topology so no latitude row can collapse
+         into a polar pinwheel. Its PAINT, however, comes from the authored
+         map grid. Every geodesic face resolves to a map cell, inherits that
+         cell's palette choice and route state, then receives only a very
+         small face-level stroke variation. This is the same coherent terrain
+         language as MERIDIAN without exposing a second render topology. */
       function bandFlatAt(u) {
         var lon = Math.atan2(u[0], u[2]);
         var lat = Math.asin(U.clamp(u[1], -1, 1));
         return [(lon + Math.PI) * surf.radius - halfW,
                 lat * halfH / (Math.PI / 2)];
       }
+
       function bandHeightAt(u) {
         var p = bandFlatAt(u);
         var eps = 1e-4;
         return heightAt(U.clamp(p[0], -halfW + eps, halfW - eps),
                         U.clamp(p[1], -halfH + eps, halfH - eps));
       }
-      function bandPaintAt(u) {
+
+      function bandPaintAt(u, faceIndex) {
         var p = bandFlatAt(u);
-        var onPath = distToPath(path, p[0], p[1]) < pathWidth * 1.05;
-        var r = rnd();
-        var col = onPath
-          ? pathCols[Math.floor(r * pathCols.length) % pathCols.length]
-          : groundCols[Math.floor(r * groundCols.length) % groundCols.length];
-        var base = U.hex2rgb(col);
+        var gx = U.clamp(Math.floor((p[0] + halfW) / CS), 0, GW - 1);
+        var gz = U.clamp(Math.floor((p[1] + halfH) / CS), 0, GH - 1);
+        var i00 = gz * HW + gx, i10 = i00 + 1;
+        var i01 = i00 + HW, i11 = i01 + 1;
+        var pd = (pdist[i00] + pdist[i10] + pdist[i01] + pdist[i11]) * 0.25;
+        var onPath = pd < pathWidth * 1.05;
+
+        /* The base is stable per authored cell. Re-seeding here is deliberate:
+           adjacent geodesic faces that land in one map cell must agree before
+           their tiny per-face stroke variation is applied. */
+        var cellRnd = U.rng('globe-cell:' + seed + ':' + gx + ':' + gz);
+        var palette = onPath ? pathCols : groundCols;
+        var col = palette[Math.floor(cellRnd() * palette.length) % palette.length];
+        var faceRnd = U.rng('globe-face:' + seed + ':' + faceIndex);
         return {
-          color: U.shift(base,
-            (rnd() - 0.5) * 0.022,
-            (rnd() - 0.5) * 0.14,
-            (rnd() - 0.5) * 0.075),
+          color: U.shift(U.hex2rgb(col),
+            (faceRnd() - 0.5) * 0.012,
+            (faceRnd() - 0.5) * 0.07,
+            (faceRnd() - 0.5) * 0.040),
           tooth: onPath ? 0.75 : 1.0
         };
       }
+
       gb.paintedIco(surf.radius, 4, bandHeightAt, bandPaintAt);
     } else {
       for (j = 0; j < GH; j++) {
@@ -4940,6 +4966,8 @@ var TERRAIN = (function () {
 
     /* ---------- planet warp (bake) ---------- */
     if (surf) {
+      /* The band ground is already emitted on its geodesic shell. Cap maps
+         and every decor piece are still authored flat and baked once here. */
       if (surf.mode !== 'band') warpData(groundData, surf);
       if (decorData) warpData(decorData, surf);
     }
@@ -9801,11 +9829,14 @@ var GAME = (function () {
     var pPitch = 0.86;
     if (pv) {
       if (pv.mode === 'band') {
-        /* THE HERO FRAME IS THE ROAD. From a near-equatorial view the belt
-           stretches across the frame like a world-road and orbiting pans
-           along it; zooming out surveys the whole globe. */
-        d = pv.radius * 1.62;
-        pPitch = 0.10;
+        /* Establish the WORLD before asking the player to read its road. The
+           old 1.62R start sat only 0.62 radius above the surface, cropping the
+           horizon out and turning coherent map cells into screen-sized flat
+           polygons. A 3.10R orbit keeps the globe identity, route and rim in
+           the first frame; the player can still move into the close tactical
+           range with the wheel. */
+        d = pv.radius * 3.10;
+        pPitch = 0.18;
       } else {
         d = Math.max(d, pv.radius * 0.80);
         pPitch = 0.58;
@@ -9889,9 +9920,9 @@ var GAME = (function () {
          side to silhouette. */
       R.sun.dir = [0.78, 0.30, 0.40];
       var fullGlobe = G.board.surf.mode === 'band';
-      R.ART.ambient = fullGlobe ? 0.40 : 0.36;
-      R.ART.shadowLift = 0.34;
-      R.ART.planetFill = fullGlobe ? 0.55 : 1.15;
+      R.ART.ambient = fullGlobe ? 0.42 : 0.36;
+      R.ART.shadowLift = fullGlobe ? 0.38 : 0.34;
+      R.ART.planetFill = fullGlobe ? 0.90 : 1.15;
       /* THE METAL BACKING CAP, armed for planet boards (see 05-render
          resize: backing > ~1600 kills the opaque pass on real Metal).
          RESIZE IS FORCED NOW: the boot-time resize ran before maxW was set,
@@ -10006,7 +10037,7 @@ var GAME = (function () {
       var pv = G && G.board && G.board.surf;
       var hi = (cam.fitDist || 160) * 1.15;
       var lo = 26;
-      if (pv && pv.mode === 'band') { lo = pv.radius * 1.35; hi = pv.radius * 3.6; }
+      if (pv && pv.mode === 'band') { lo = pv.radius * 1.45; hi = pv.radius * 5.2; }
       else if (pv) { lo = Math.max(26, pv.radius * 1.15); hi = Math.max(hi, pv.radius * 1.6); }
       cam.targetDist = U.clamp(cam.targetDist * (1 + Math.sign(e.deltaY) * 0.10), lo, hi);
     }, { passive: false });
@@ -10044,7 +10075,7 @@ var GAME = (function () {
         if (touchDist > 0) {
           var pv2 = G && G.board && G.board.surf;
           var hi2 = (cam.fitDist || 160) * 1.15, lo2 = 26;
-          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.35; hi2 = pv2.radius * 3.6; }
+          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.45; hi2 = pv2.radius * 5.2; }
           cam.targetDist = U.clamp(cam.targetDist * (touchDist / d), lo2, hi2);
         }
         touchDist = d;
@@ -10763,9 +10794,16 @@ var GAME = (function () {
        camera dropped low, which is precisely when the player has zoomed in to
        look at something. Rim exists to separate a silhouette from its
        background; the ground IS the background. */
-    var groundBandCap = G.board.surf && G.board.surf.mode === 'band'
+    var globeGround = !!(G.board.surf && G.board.surf.mode === 'band');
+    var groundBandCap = globeGround
       ? R.ART.globeBandCap : R.ART.bandCap;
-    R.push(G.groundMesh, U.m4ident(), { castShadow: false, facetJitter: 0.26, rimScale: 0.18, bandCap: groundBandCap });
+    R.push(G.groundMesh, U.m4ident(), {
+      castShadow: false,
+      facetJitter: globeGround ? 0.10 : 0.26,
+      rimScale: globeGround ? 0.10 : 0.18,
+      bandCap: groundBandCap,
+      sphereNormal: globeGround ? 1.0 : 0.0
+    });
     /* The planet body sits UNDER the play surface and closes the globe. */
     if (G.planetBodyMesh) {
       R.push(G.planetBodyMesh, U.m4ident(), { castShadow: false, rimScale: 0.30, bandCap: R.ART.decorBandCap });
@@ -11869,6 +11907,40 @@ var UI = (function () {
           particles: FX.count,
           plots: G.board.plots.length,
           freePlots: G.board.plots.filter(function (p) { return !p.tower; }).length
+        };
+      },
+
+      /* Geometry probe for the globe regressions. A screenshot proves the
+         picture; this proves there is no hidden body or zero-area pole face
+         waiting to flicker at a different camera angle. */
+      terrainReport: function () {
+        var G = GAME.state;
+        if (!G || !G.board || !G.board.groundData) return { ok: false };
+        var data = G.board.groundData;
+        var verts = data.verts;
+        var degenerate = 0;
+        var minArea2 = Infinity;
+        for (var i = 0; i < verts.length; i += 36) {
+          var ax = verts[i], ay = verts[i + 1], az = verts[i + 2];
+          var bx = verts[i + 12], by = verts[i + 13], bz = verts[i + 14];
+          var cx = verts[i + 24], cy = verts[i + 25], cz = verts[i + 26];
+          var abx = bx - ax, aby = by - ay, abz = bz - az;
+          var acx = cx - ax, acy = cy - ay, acz = cz - az;
+          var nx = aby * acz - abz * acy;
+          var ny = abz * acx - abx * acz;
+          var nz = abx * acy - aby * acx;
+          var area2 = Math.sqrt(nx * nx + ny * ny + nz * nz);
+          minArea2 = Math.min(minArea2, area2);
+          if (!isFinite(area2) || area2 < 1e-5) degenerate++;
+        }
+        return {
+          ok: true,
+          mode: G.board.surf ? G.board.surf.mode : 'flat',
+          triangles: data.triCount,
+          vertices: verts.length / 12,
+          degenerate: degenerate,
+          minArea2: isFinite(minArea2) ? +minArea2.toFixed(6) : null,
+          hasInnerBody: !!G.board.planetBody
         };
       },
 

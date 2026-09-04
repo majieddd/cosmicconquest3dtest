@@ -11,14 +11,29 @@ sphere (bake + draw + particles + camera + picking).
 
 exposure 1.00, contrast 1.16, saturation 0.92, inkStrength 1.20 with
 1.5x thickness, ink thresholds 0.45/0.68, canvas 0.30, grain 0.0,
-halftone 0.0, bandCap 0.72, spec 0.30/64, rim 0.70/3.0, vignette 0.44.
+halftone 0.0, bandCap 0.72, globeBandCap 0.50, spec 0.30/64,
+rim 0.70/3.0, vignette 0.26.
 
 ## The maps
 
 - MERIDIAN (board 0): wide curved cap, R=90, 28-degree bow. The
   reference planet framing.
-- CIRCUMFERENCE (board 1): exact single wrap (R = halfW/pi), band 60x16
-  cells, lane 0.9 turns, chevron traffic, goldBonus +12%, zoom to R*3.6.
+- CIRCUMFERENCE (board 1): exact single wrap (R = halfW/pi), authored
+  band 60x20 cells, lane 0.9 turns, chevron traffic, goldBonus +12%,
+  tactical zoom R*1.45 to R*5.2.
+
+## Globe surface
+
+CIRCUMFERENCE uses one closed geodesic ground mesh with no inner body.
+Its height and paint are sampled from the same authored cell grid and the
+same ground/path palettes as MERIDIAN. The cell identity is stable, so a
+cluster of geodesic faces reads as one paint stroke instead of random
+triangles. Lighting uses the continuous radial normal while albedo and
+canvas tooth keep the faceted painted treatment.
+
+The geometry probe reports 5,120 triangles, 15,360 vertices, zero
+degenerate faces, and no hidden inner body. Browser checks cover near,
+wide, survey, orbit and pole views plus a fourteen-tower combat fixture.
 
 ## Verification ROUNDS (the requested 4)
 
@@ -40,8 +55,8 @@ halftone 0.0, bandCap 0.72, spec 0.30/64, rim 0.70/3.0, vignette 0.44.
   steps multi-gate M / bigger planet L), tech verifier timed out (its
   checks were re-run by me: coil-floor gating OK, allocations OK,
   body clearance fixed 0.35->0.55 after z-fight math).
-- ROUND 4 - fixes: globe 42x10 -> 60x16 with R 28.65 (band no longer a
-  ribbon), radius-scaled zoom [R*1.35, R*3.6], SPHERE PICKING
+- ROUND 4 - fixes: globe 42x10 -> 60x20 with R 28.65 (band no longer a
+  ribbon), radius-scaled zoom [R*1.45, R*5.2], SPHERE PICKING
   (ray-sphere + unworld, the placement-critical fix), chevron route
   stream, spawn/goal dressing, goldBonus, hero frame = near-equatorial
   ("the road" stage; orbiting pans the war around the world; zoom-out
