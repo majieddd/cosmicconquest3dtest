@@ -20,20 +20,47 @@ rim 0.70/3.0, vignette 0.26.
   reference planet framing.
 - CIRCUMFERENCE (board 1): exact single wrap (R = halfW/pi), authored
   band 60x20 cells, lane 0.9 turns, chevron traffic, goldBonus +12%,
-  tactical zoom R*1.45 to R*5.2.
+  tactical zoom from R*1.45; the survey limit expands for portrait screens.
 
 ## Globe surface
 
 CIRCUMFERENCE uses one closed geodesic ground mesh with no inner body.
-Its height and paint are sampled from the same authored cell grid and the
-same ground/path palettes as MERIDIAN. The cell identity is stable, so a
-cluster of geodesic faces reads as one paint stroke instead of random
-triangles. Lighting uses the continuous radial normal while albedo and
-canvas tooth keep the faceted painted treatment.
+The uplands retain MERIDIAN's blue-grey painted palette, with a lighter
+mineral canyon floor and dark rock shoulders along the route. Paint cells
+keep a stable identity and shrink in count toward the poles to avoid
+pinched texture noise. World-space paint tooth and radial rock strata
+remain attached to the surface during orbit.
 
-The geometry probe reports 5,120 triangles, 15,360 vertices, zero
-degenerate faces, and no hidden inner body. Browser checks cover near,
-wide, survey, orbit and pole views plus a fourteen-tower combat fixture.
+Build `19-canyon` adds a periodic 241x121 height field, with elevations
+from -1.37 to +3.62 world units. The entire route follows the recessed
+floor; terrain selection intersects that height field rather than the old
+base sphere. Displaced face normals blended 22% toward radial normals
+light the rock slopes. Globe-only ink is 0.48, canvas is 0.05, exposure is
+1.04, and wet terrain highlights are reduced to 6% of the model strength.
+Turrets and barrels use the same surface frame as their bases.
+
+The shell has 81,920 triangles, 245,760 vertices, no degenerate or inward
+faces, and exactly two faces sharing every edge. There is no inner body.
+Desktop and portrait framing use the tighter camera field of view while
+preserving the player's relative zoom on resize.
+
+## Canyon regression checks
+
+Run `tests/planet-regression.js` in a browser tab containing this build.
+It returns structured evidence or throws at the first failed invariant.
+Checks include watertight geometry, route elevation, 45 raised-terrain
+selection samples over eight orbits, placement of all fourteen towers,
+100 ground units, and pixel comparisons with occlusion culling on/off in
+twelve near, survey and pole views. The latter protects tall silhouettes
+from premature horizon popping.
+
+`__RQ.performanceReport()` separates CPU submission time, actual frame
+cadence and asynchronous GPU timer measurements. Adaptive resolution
+uses available GPU timings and resizes the final canvas as well as scene
+targets. Measurements on the local Apple M5/Metal browser at 1440x900,
+0.85 render scale, fourteen towers and 100 stationary test units were
+approximately 60 fps and 4.1 ms GPU time. This is one-device evidence,
+not a performance guarantee for other devices.
 
 ## Verification ROUNDS (the requested 4)
 

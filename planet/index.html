@@ -2513,7 +2513,7 @@ var SH = (function () {
     '',
     'void main(){',
     '  vec3 N = normalize(vNormal);',
-    '  if (uItemC.y > 0.5) N = normalize(vWorld);',
+    '  if (uItemC.y > 0.0) N = normalize(mix(N, normalize(vWorld), uItemC.y));',
     '  vec3 Vd = normalize(uCamPos - vWorld);',
     '  vec3 L = normalize(uLightDir);',
     '',
@@ -2538,7 +2538,8 @@ var SH = (function () {
        multiplied a dark albedo into near-invisibility and the night face
        stayed a hole.) */
     '  float ndlL = clamp(ndl + uPlanetFill * max(0.0, dot(N, Vd)), -1.0, 1.0);',
-    '  float sh = mix(1.0, shadowVis(), uShadowStrength);',
+    '  float sh = 1.0;',
+    '  if (uShadowStrength > 0.0) sh = mix(1.0, shadowVis(), uShadowStrength);',
     /* The shadow is folded into the lighting term BEFORE quantising, so a
        shadowed facet steps down a whole band rather than being darkened
        smoothly. That keeps the cel edge intact inside shadows, which is where
@@ -2561,6 +2562,13 @@ var SH = (function () {
     '  float tooth = paint.x;',
     '  float ridge = paint.y;',
     '  col *= 1.0 + (tooth - 0.5) * uToothStrength * vTooth;',
+    /* Radial rock strata remain attached to terrain during orbit. */
+    '  if (uItemC.z > 0.5){',
+    '    float altitude = length(vWorld) - uItemC.w;',
+    '    float stratum = sin(altitude * 7.5 + tooth * 0.45);',
+    '    col *= mix(0.72, 1.0, smoothstep(-1.3, 1.5, altitude));',
+    '    col *= 0.94 + 0.06 * smoothstep(-0.3, 0.5, stratum);',
+    '  }',
     '  col += uLightColor * max(0.0, ridge - 0.64) * 0.085 * vTooth * sh;',
     '',
     /* The wet specular. Posterised to two steps: either the knife ridge
@@ -2570,7 +2578,7 @@ var SH = (function () {
     '  float spec = pow(max(dot(N, H), 0.0), uSpecPower);',
     '  spec += (ridge - 0.55) * 0.28 * vTooth;',
     '  spec = step(0.35, spec) * (0.55 + 0.45 * step(0.75, spec));',
-    '  col += uLightColor * spec * uSpecStrength * sh;',
+    '  col += uLightColor * spec * uSpecStrength * sh * (uItemC.z > 0.5 ? 0.06 : 1.0);',
     '',
     /* Rim. Biased toward the light side so it reads as light wrapping around
        the form, not as a uniform outline glow. */
@@ -3412,7 +3420,10 @@ var R = (function () {
   var opaqueN = 0, transparentN = 0, particleN = 0;
 
   var pal = null;
-  var quality = { bloom: true, shadows: true, ink: true, shadowSize: 2048, scale: 1.0, maxW: 0 };
+  var quality = {
+    bloom: true, shadows: true, ink: true, globeCulling: true,
+    shadowSize: 2048, scale: 1.0, maxW: 0
+  };
 
   /* ---------- ART CONSTANTS ----------
      Every number that decides what the picture LOOKS like, in one block, so
@@ -3510,9 +3521,84 @@ var R = (function () {
 
   /* Per-frame counters. "It feels slow" is not actionable; a draw-call count
      and a per-pass millisecond split is. */
-  var prof = { draws: 0, shadowDraws: 0, tris: 0, ms: {}, on: false };
+  var prof = {
+    draws: 0, shadowDraws: 0, tris: 0,
+    opaqueItems: 0, transparentItems: 0, particles: 0,
+    ms: {}, on: false,
+    gpuMs: null, gpuLastMs: null, gpuAvailable: false,
+    gpuDisjoint: 0, gpuAge: 1e9
+  };
   function markStart(k) { if (prof.on) prof.ms['_' + k] = U.nowMs(); }
   function markEnd(k) { if (prof.on) prof.ms[k] = U.nowMs() - prof.ms['_' + k]; }
+
+  /* GPU TIME, NOT JUST SUBMISSION TIME.
+     WebGL commands are asynchronous, so timing a draw call with
+     performance.now() measures how quickly JavaScript filled the command
+     queue, not how long the GPU took to draw the frame. That made the old
+     adaptive scaler report sub-millisecond frames while the display was
+     visibly missing refreshes. Timer queries return later without stalling
+     the pipeline. Sampling one frame in four keeps their overhead negligible
+     while giving the scaler a truthful fill-rate signal. */
+  var gpuTimerExt = null;
+  var gpuPending = [];
+  var gpuHistory = [];
+  var gpuFrame = 0;
+
+  function pollGpuTimers() {
+    if (!gpuTimerExt) return;
+    prof.gpuAge++;
+    if (gl.getParameter(gpuTimerExt.GPU_DISJOINT_EXT)) {
+      for (var di = 0; di < gpuPending.length; di++) gl.deleteQuery(gpuPending[di]);
+      gpuPending.length = 0;
+      gpuHistory.length = 0;
+      prof.gpuMs = null;
+      prof.gpuLastMs = null;
+      prof.gpuAge = 1e9;
+      prof.gpuDisjoint++;
+      return;
+    }
+    while (gpuPending.length &&
+           gl.getQueryParameter(gpuPending[0], gl.QUERY_RESULT_AVAILABLE)) {
+      var q = gpuPending.shift();
+      prof.gpuLastMs = gl.getQueryParameter(q, gl.QUERY_RESULT) / 1000000;
+      gpuHistory.push(prof.gpuLastMs);
+      if (gpuHistory.length > 9) gpuHistory.shift();
+      /* The timer can include a one-off shader or compositor warm-up. A
+         rolling median keeps that cold spike visible as gpuLastMs while
+         stopping one sample from lowering the resolution for several
+         seconds. Three results are enough to establish the first median. */
+      if (gpuHistory.length >= 3) {
+        var ordered = gpuHistory.slice().sort(function (a, b) { return a - b; });
+        prof.gpuMs = ordered[ordered.length >> 1];
+      }
+      prof.gpuAge = 0;
+      gl.deleteQuery(q);
+    }
+  }
+
+  function beginGpuTimer() {
+    pollGpuTimers();
+    if (!gpuTimerExt || gpuPending.length >= 4 || (gpuFrame++ & 3) !== 0) return null;
+    try {
+      var q = gl.createQuery();
+      gl.beginQuery(gpuTimerExt.TIME_ELAPSED_EXT, q);
+      return q;
+    } catch (e) {
+      recordError('gpu-timer-begin', e);
+      return null;
+    }
+  }
+
+  function endGpuTimer(q) {
+    if (!q) return;
+    try {
+      gl.endQuery(gpuTimerExt.TIME_ELAPSED_EXT);
+      gpuPending.push(q);
+    } catch (e) {
+      gl.deleteQuery(q);
+      recordError('gpu-timer-end', e);
+    }
+  }
 
   var WHITE3 = [1, 1, 1];
   var view = U.m4ident(), proj = U.m4ident(), viewProj = U.m4ident();
@@ -3545,6 +3631,8 @@ var R = (function () {
   function init(cv, opts) {
     canvas = cv;
     gl = GL.init(cv, opts || {});
+    gpuTimerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    prof.gpuAvailable = !!gpuTimerExt;
     fsTri = GL.fullscreenTri();
 
     prog.mesh = GL.program(SH.MESH_VS, SH.MESH_FS, 'mesh');
@@ -3618,11 +3706,26 @@ var R = (function () {
     min: 0.62, max: 1.0, cssW: 1, cssH: 1
   };
 
-  function tickAdaptive(frameMs) {
+  function tickAdaptive(frameMs, cadenceMs) {
     if (!adapt.on || !canvas) return;
     /* An exponential average, so one hitched frame does not drop the scale and
        one fast frame does not raise it. */
-    adapt.avg = adapt.avg * 0.88 + frameMs * 0.12;
+    var sample = frameMs;
+    if (prof.gpuMs !== null && prof.gpuAge < 30) {
+      sample = Math.max(sample, prof.gpuMs);
+      adapt.source = 'gpu';
+    } else if (isFinite(cadenceMs) && cadenceMs > adapt.target * 1.15 && cadenceMs < 100) {
+      /* Timer queries are optional. When unavailable, a missed refresh is the
+         reliable signal that GPU, compositor or main-thread work exceeded the
+         display budget. Healthy 60 Hz cadence is not used for up-scaling,
+         because its 16.7 ms includes idle time waiting for v-sync. */
+      sample = Math.max(sample, cadenceMs);
+      adapt.source = 'cadence';
+    } else {
+      adapt.source = 'cpu';
+    }
+    adapt.sample = sample;
+    adapt.avg = adapt.avg * 0.88 + sample * 0.12;
     adapt.cooldown -= 1;
     if (adapt.cooldown > 0) return;
     var s = quality.scale;
@@ -3638,6 +3741,22 @@ var R = (function () {
   }
 
   function resize(w, h, dpr) {
+    /* Render-target allocation and the browser compositor's first frame at a
+       new size are deliberate hitches, not steady-state GPU load. Discard
+       outstanding timer samples and give the new backing store one second to
+       settle, otherwise a window resize can drive quality to its minimum. */
+    if (gpuTimerExt) {
+      for (var qi = 0; qi < gpuPending.length; qi++) gl.deleteQuery(gpuPending[qi]);
+      gpuPending.length = 0;
+      gpuHistory.length = 0;
+      prof.gpuMs = null;
+      prof.gpuLastMs = null;
+      prof.gpuAge = 1e9;
+    }
+    adapt.avg = adapt.target;
+    adapt.sample = adapt.target;
+    adapt.source = 'resize';
+    adapt.cooldown = Math.max(adapt.cooldown, 60);
     DPR = dpr || DPR || 1;
     adapt.cssW = w; adapt.cssH = h;
     W = Math.max(2, Math.round(w * DPR * quality.scale));
@@ -3653,8 +3772,15 @@ var R = (function () {
       W = Math.max(2, Math.round(w * DPR * quality.scale));
       H = Math.max(2, Math.round(h * DPR * quality.scale));
     }
-    canvas.width = Math.max(2, Math.round(w * DPR));
-    canvas.height = Math.max(2, Math.round(h * DPR));
+    /* The default framebuffer must follow the adaptive backing size too.
+       Previously only the offscreen scene buffers used W by H; compositePass
+       still shaded the full device-pixel canvas. On a Retina-class 1440px
+       viewport that left roughly two million expensive grade, tooth and
+       bloom pixels outside the scaler's control. CSS stretches this backing
+       store to the requested logical size, which is exactly what dynamic
+       resolution is meant to do. */
+    canvas.width = W;
+    canvas.height = H;
     canvas.style.width = w + 'px';
     canvas.style.height = h + 'px';
 
@@ -3714,6 +3840,7 @@ var R = (function () {
        normal reveals the mesh as a loose shell. Radial lighting keeps the
        sphere coherent while leaving the colour and tooth texture untouched. */
     it.sphereNormal = (o && o.sphereNormal !== undefined) ? o.sphereNormal : 0;
+    it.terrainRadius = (o && o.terrainRadius) || 0;
     /* PER-DRAW RIM STRENGTH.
        Rim light is scene light, so its COLOUR is the defender's key on every
        surface: the style law forbids two faction colours sharing a frame. Its
@@ -3824,6 +3951,7 @@ var R = (function () {
       p.u1f('uExplode', it.explode);
       it.mesh.draw();
       prof.shadowDraws++;
+      prof.tris += it.mesh.count / 3;
     }
     gl.cullFace(gl.BACK);
   }
@@ -3843,6 +3971,8 @@ var R = (function () {
     p.um4('uInvViewProj', invViewProj);
     p.u3v('uCamPos', cam.eyeActual || cam.pos);
     fsTri.draw();
+    prof.draws++;
+    prof.tris++;
   }
 
   function opaquePass() {
@@ -3900,9 +4030,10 @@ var R = (function () {
       p.u4f('uItemB', it.tintMix,
         it.facetJitter >= 0 ? it.facetJitter : ART.facetJitter,
         it.rimScale, ART.debugMode || 0);
-      p.u4f('uItemC', it.bandCap, it.sphereNormal, 0, 0);
+      p.u4f('uItemC', it.bandCap, it.sphereNormal, it.terrainRadius > 0 ? 1 : 0, it.terrainRadius);
       it.mesh.draw();
       prof.draws++;
+      prof.tris += it.mesh.count / 3;
     }
   }
 
@@ -3936,6 +4067,8 @@ var R = (function () {
       p.u1f('uFresnel', it.fresnel);
       p.u1f('uPulse', it.pulse);
       it.mesh.draw();
+      prof.draws++;
+      prof.tris += it.mesh.count / 3;
     }
     gl.enable(gl.CULL_FACE);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
@@ -3962,6 +4095,8 @@ var R = (function () {
     p.u3f('uRight', view[0], view[4], view[8]);
     p.u3f('uUp', view[1], view[5], view[9]);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, particleN);
+    prof.draws++;
+    prof.tris += particleN * 2;
 
     gl.bindVertexArray(null);
     gl.enable(gl.CULL_FACE);
@@ -3985,6 +4120,8 @@ var R = (function () {
        the player called the best of 8804. */
     p.u1f('uThickness', Math.max(1.0, H / 720) * 1.5);
     fsTri.draw();
+    prof.draws++;
+    prof.tris++;
   }
 
   function bloomPass() {
@@ -3998,6 +4135,8 @@ var R = (function () {
     b.u1f('uThreshold', ART.bloomThreshold);
     b.u1f('uSoftKnee', 0.6);
     fsTri.draw();
+    prof.draws++;
+    prof.tris++;
 
     /* Three widening passes ping-ponging between two half-res targets. Each
        pass doubles the tap spacing, so the effective kernel grows to about 40
@@ -4010,11 +4149,15 @@ var R = (function () {
       p.tex('uColor', 0, src.textures[0]);
       p.u2f('uDir', spread / rt.blurA.w, 0);
       fsTri.draw();
+      prof.draws++;
+      prof.tris++;
 
       rt.blurB.bind();
       p.tex('uColor', 0, rt.blurA.textures[0]);
       p.u2f('uDir', 0, spread / rt.blurB.h);
       fsTri.draw();
+      prof.draws++;
+      prof.tris++;
 
       src = rt.blurB;
     }
@@ -4049,12 +4192,18 @@ var R = (function () {
     p.u1f('uFlashWhite', fx.flashWhite);
     p.u1f('uDesaturate', fx.desaturate);
     fsTri.draw();
+    prof.draws++;
+    prof.tris++;
   }
 
   function render(dt) {
     if (!gl || !rt.main) return;
+    var gpuQuery = beginGpuTimer();
     try {
-      prof.draws = 0; prof.shadowDraws = 0;
+      prof.draws = 0; prof.shadowDraws = 0; prof.tris = 0;
+      prof.opaqueItems = opaqueN;
+      prof.transparentItems = transparentN;
+      prof.particles = particleN;
       time += dt;
       buildMatrices(dt);
       markStart('shadow'); shadowPass(); markEnd('shadow');
@@ -4082,8 +4231,10 @@ var R = (function () {
          abandon the rest of the frame silently and leave a stale image on
          screen that looks like a freeze rather than an error. */
       recordError('render', e);
+    } finally {
+      endGpuTimer(gpuQuery);
+      reset();
     }
-    reset();
   }
 
   /* ---------- screen space helpers ---------- */
@@ -4099,8 +4250,8 @@ var R = (function () {
     var cw = viewProj[3] * x + viewProj[7] * y + viewProj[11] * z + viewProj[15];
     if (cw <= 0.0001) return null;
     return {
-      x: (cx / cw * 0.5 + 0.5) * (W / DPR / quality.scale),
-      y: (1 - (cy / cw * 0.5 + 0.5)) * (H / DPR / quality.scale),
+      x: (cx / cw * 0.5 + 0.5) * adapt.cssW,
+      y: (1 - (cy / cw * 0.5 + 0.5)) * adapt.cssH,
       w: cw
     };
   }
@@ -4110,13 +4261,12 @@ var R = (function () {
      the ground. */
   function screenToGround(sx, sy, planeY) {
     planeY = planeY || 0;
-    var cssW = W / DPR / quality.scale, cssH = H / DPR / quality.scale;
+    var cssW = adapt.cssW, cssH = adapt.cssH;
     var ndcX = (sx / cssW) * 2 - 1;
     var ndcY = 1 - (sy / cssH) * 2;
     var near = U.m4xform(invViewProj, [ndcX, ndcY, -1]);
     var far = U.m4xform(invViewProj, [ndcX, ndcY, 1]);
     var dir = U.V.sub(far, near);
-    if (Math.abs(dir[1]) < 1e-6) return null;
     /* PLANET PICKING. On a curved board the flat y=0 plane is NOT the deck:
        the ray must intersect the PLANET SPHERE and the hit un-maps to flat
        sim space. Without this, hover and placement drift off the surface by
@@ -4133,21 +4283,47 @@ var R = (function () {
          'cannot place turrets' defect on planet boards). */
       var a = d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2];
       var b = o[0] * d2[0] + o[1] * d2[1] + o[2] * d2[2];
-      var c = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - (surf.radius + 0.3) * (surf.radius + 0.3);
+      var pickRadius = surf.radius + (surf.mode === 'band' ? 7 : 0.3);
+      var c = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - pickRadius * pickRadius;
       var disc = b * b - a * c;
       if (disc < 0) return null;
       var sq = Math.sqrt(disc);
       var t = (-b - sq) / a;
       if (t < 0) t = (-b + sq) / a;
       if (t < 0) return null;
+      if (surf.mode === 'band') {
+        /* Intersect the same radial height field used by units and terrain.
+           The old base-sphere hit selected behind elevated canyon shoulders. */
+        var begin = Math.max(0, (-b - sq) / a), end = (-b + sq) / a;
+        var steps = Math.ceil((end - begin) * Math.sqrt(a) / 0.3);
+        function clearance(at) {
+          var wp = [o[0] + d2[0] * at, o[1] + d2[1] * at, o[2] + d2[2] * at];
+          var fp = surf.unworld(wp);
+          return U.V.len(wp) - surf.radius - GAME.state.board.heightAt(fp[0], fp[2]);
+        }
+        var prev = begin, found = false;
+        for (var si = 1; si <= steps; si++) {
+          var next = begin + (end - begin) * si / steps;
+          if (clearance(next) <= 0) {
+            for (var ri = 0; ri < 12; ri++) {
+              var mid = (prev + next) * 0.5;
+              if (clearance(mid) > 0) prev = mid; else next = mid;
+            }
+            t = (prev + next) * 0.5; found = true; break;
+          }
+          prev = next;
+        }
+        if (!found) return null;
+      }
       var hit = [o[0] + d2[0] * t, o[1] + d2[1] * t, o[2] + d2[2] * t];
       var flat = surf.unworld(hit);
       if (typeof window !== 'undefined' && window.__PICKDBG) {
         window.__PICKDBG.push({ near: near, far: far, a: a, b: b, disc: disc, t: t,
           hit: hit, flat: flat });
       }
-      return [flat[0], 0, flat[2]];
+      return [flat[0], surf.mode === 'band' ? GAME.state.board.heightAt(flat[0], flat[2]) : 0, flat[2]];
     }
+    if (Math.abs(dir[1]) < 1e-6) return null;
     var t = (planeY - near[1]) / dir[1];
     if (t < 0) return null;
     return [near[0] + dir[0] * t, planeY, near[2] + dir[2] * t];
@@ -4177,8 +4353,11 @@ var R = (function () {
     adaptive: adapt,
     stats: function () {
       return { draws: prof.draws, shadowDraws: prof.shadowDraws,
-               opaqueItems: opaqueN, transparentItems: transparentN,
-               particles: particleN, ms: prof.ms };
+               tris: prof.tris,
+               opaqueItems: prof.opaqueItems, transparentItems: prof.transparentItems,
+               particles: prof.particles, gpuMs: prof.gpuMs,
+               gpuLastMs: prof.gpuLastMs,
+               gpuAvailable: prof.gpuAvailable, gpuAge: prof.gpuAge, ms: prof.ms };
     },
     /* Diagnostic: the inverse view-proj matrix (pick debugging; the picking
        path's correctness depends on it matching R.project exactly). */
@@ -4442,6 +4621,7 @@ var TERRAIN = (function () {
     var pathWidth = def.pathWidth || 4.2;
 
     var path = buildPath(def.waypoints, 16);
+    var canyon = def.surface === 'band';
 
     /* PLANET SURFACE, chosen ONCE for the whole build. Everything below
        (relief, spires, warp, body) needs to know. */
@@ -4549,7 +4729,50 @@ var TERRAIN = (function () {
       }
     }
 
+    /* A denser, periodic field keeps the canyon floor, collision height and
+       rendered shell on one surface. It is baked once; units only perform
+       four array reads as they traverse the route. */
+    var reliefW = 241, reliefH = 121;
+    var reliefField = canyon ? new Float32Array(reliefW * reliefH) : null;
+    function canyonHeight(x, z) {
+      var u = surf.toUnit(x, z);
+      var n = Math.sin(u[0] * 7.3 + u[1] * 4.1 + u[2] * 2.8);
+      n += Math.sin(u[0] * 3.2 - u[1] * 8.7 + u[2] * 6.1) * 0.5;
+      var ridges = Math.pow(1 - Math.abs(Math.sin(u[0] * 5.4 + u[2] * 4.6 - u[1] * 3.1)), 3);
+      var upland = 1.1 + (n + 1.5) * 0.48 + ridges * 1.30;
+      var d = distToPath(path, x, z);
+      var floor = -1.25 + Math.sin(x * 0.10) * 0.12;
+      var bank = U.smoothstep(pathWidth * 0.62, pathWidth * 1.6, d);
+      return U.mix(floor, upland, bank);
+    }
+    if (canyon) {
+      for (var rz = 0; rz < reliefH; rz++) {
+        for (var rx = 0; rx < reliefW; rx++) {
+          reliefField[rz * reliefW + rx] = canyonHeight(
+            -halfW + rx * 2 * halfW / (reliefW - 1),
+            -halfH + rz * 2 * halfH / (reliefH - 1));
+        }
+        var left = rz * reliefW, right = left + reliefW - 1;
+        reliefField[left] = reliefField[right] = (reliefField[left] + reliefField[right]) * 0.5;
+      }
+      for (var pole = 0; pole < reliefH; pole += reliefH - 1) {
+        var poleValue = reliefField[pole * reliefW];
+        for (var px = 0; px < reliefW; px++) reliefField[pole * reliefW + px] = poleValue;
+      }
+    }
+
     function heightAt(wx, wz) {
+      if (canyon) {
+        var span = halfW * 2;
+        var wrapped = ((wx + halfW) % span + span) % span;
+        var fxr = wrapped / span * (reliefW - 1);
+        var fzr = U.clamp((wz + halfH) / (halfH * 2), 0, 1) * (reliefH - 1);
+        var xr = Math.min(reliefW - 2, Math.floor(fxr));
+        var zr = Math.min(reliefH - 2, Math.floor(fzr));
+        var txr = fxr - xr, tzr = fzr - zr, ri = zr * reliefW + xr;
+        return U.mix(U.mix(reliefField[ri], reliefField[ri + 1], txr),
+          U.mix(reliefField[ri + reliefW], reliefField[ri + reliefW + 1], txr), tzr);
+      }
       var fx = (wx + halfW) / CS, fz = (wz + halfH) / CS;
       var x0 = Math.floor(fx), z0 = Math.floor(fz);
       if (x0 < 0 || z0 < 0 || x0 >= HW - 1 || z0 >= HH - 1) return -6;
@@ -4619,30 +4842,35 @@ var TERRAIN = (function () {
 
       function bandPaintAt(u, faceIndex) {
         var p = bandFlatAt(u);
-        var gx = U.clamp(Math.floor((p[0] + halfW) / CS), 0, GW - 1);
         var gz = U.clamp(Math.floor((p[1] + halfH) / CS), 0, GH - 1);
-        var i00 = gz * HW + gx, i10 = i00 + 1;
-        var i01 = i00 + HW, i11 = i01 + 1;
-        var pd = (pdist[i00] + pdist[i10] + pdist[i01] + pdist[i11]) * 0.25;
-        var onPath = pd < pathWidth * 1.05;
+        /* Preserve the map's painted cells without crushing sixty longitude
+           cells into speckle at each pole. Their physical width stays similar
+           as latitude rings shrink. */
+        var rowLatitude = ((gz + 0.5) / GH - 0.5) * Math.PI;
+        var rowCells = Math.max(1, Math.round(GW * Math.cos(rowLatitude)));
+        var gx = U.clamp(Math.floor((p[0] + halfW) / (halfW * 2) * rowCells), 0, rowCells - 1);
+        var pd = distToPath(path, p[0], p[1]);
+        var onPath = pd < pathWidth * 0.66;
 
         /* The base is stable per authored cell. Re-seeding here is deliberate:
            adjacent geodesic faces that land in one map cell must agree before
            their tiny per-face stroke variation is applied. */
         var cellRnd = U.rng('globe-cell:' + seed + ':' + gx + ':' + gz);
-        var palette = onPath ? pathCols : groundCols;
+        var wall = !onPath && pd < pathWidth * 1.65;
+        var palette = onPath ? ['#586b78', '#617781', '#526572', '#6a7c84'] :
+          wall ? ['#29394b', '#34495a', '#3b5060', '#263648'] : groundCols;
         var col = palette[Math.floor(cellRnd() * palette.length) % palette.length];
         var faceRnd = U.rng('globe-face:' + seed + ':' + faceIndex);
         return {
           color: U.shift(U.hex2rgb(col),
             (faceRnd() - 0.5) * 0.012,
             (faceRnd() - 0.5) * 0.07,
-            (faceRnd() - 0.5) * 0.040),
+            (faceRnd() - 0.5) * 0.018),
           tooth: onPath ? 0.75 : 1.0
         };
       }
 
-      gb.paintedIco(surf.radius, 4, bandHeightAt, bandPaintAt);
+      gb.paintedIco(surf.radius, 6, bandHeightAt, bandPaintAt);
     } else {
       for (j = 0; j < GH; j++) {
         for (i = 0; i < GW; i++) {
@@ -7933,6 +8161,8 @@ var FX = (function () {
       var x0 = px[i], y0 = py[i], z0 = pz[i];
       if (surfM_) {
         var wp = surfM_.world(x0, y0, z0);
+        if (surfM_.mode === 'band' &&
+            !GAME.isWorldVisible(x0, z0, Math.max(4, Math.abs(y0) + s * Math.max(2, stretch[i])))) continue;
         x0 = wp[0]; y0 = wp[1]; z0 = wp[2];
       }
       R.pushParticle(x0, y0, z0,
@@ -9743,6 +9973,26 @@ var GAME = (function () {
     if (!s) return [p[0], h === undefined ? p[1] : h, p[2]];
     return s.world(p[0], h === undefined ? p[1] : h, p[2]);
   }
+
+  /* Cull only bounding spheres entirely inside the planet's occlusion cone
+     and behind its tangent plane. A normal-facing test incorrectly removes
+     tall silhouettes before they disappear behind the limb. The occluder is
+     smaller than the deepest canyon floor, so raised terrain cannot cause
+     early rejection. */
+  function globeVisible(x, z, margin) {
+    var s = G && G.board && G.board.surf;
+    if (!s || s.mode !== 'band' || R.quality.globeCulling === false) return true;
+    var base = s.world(x, 0, z);
+    var eye = R.cam.pos;
+    var bound = (margin === undefined ? 4 : margin) + Math.abs(G.board.heightAt(x, z));
+    var eyeLen = U.V.len(eye), delta = U.V.sub(base, eye), distance = U.V.len(delta);
+    var inner = s.radius - 1.6;
+    if (eyeLen <= inner || distance <= bound) return true;
+    var axial = -U.V.dot(delta, eye) / eyeLen;
+    if (axial <= (eyeLen * eyeLen - inner * inner) / eyeLen + bound) return true;
+    var theta = Math.acos(U.clamp(axial / distance, -1, 1));
+    return theta + Math.asin(Math.min(1, bound / distance)) >= Math.asin(inner / eyeLen);
+  }
   var canvas = null;
   var running = false;
   var raf = 0;
@@ -9781,7 +10031,11 @@ var GAME = (function () {
     hoverPlot: null, hoverTower: null, ground: null
   };
 
-  var stats = { fps: 60, frameMs: 0, drawCalls: 0, particles: 0, tris: 0 };
+  var stats = {
+    fps: 60, frameMs: 0, frameIntervalMs: 16.7,
+    drawCalls: 0, particles: 0, tris: 0,
+    culledDenizens: 0, culledTowers: 0, culledProjectiles: 0
+  };
   var fpsSamples = [];
 
   var errors = [];
@@ -9832,10 +10086,13 @@ var GAME = (function () {
         /* Establish the WORLD before asking the player to read its road. The
            old 1.62R start sat only 0.62 radius above the surface, cropping the
            horizon out and turning coherent map cells into screen-sized flat
-           polygons. A 3.10R orbit keeps the globe identity, route and rim in
-           the first frame; the player can still move into the close tactical
-           range with the wheel. */
-        d = pv.radius * 3.10;
+           polygons. A 4.10R orbit keeps the whole globe between the top HUD
+           and tower dock at 16:9 instead of hiding both poles behind chrome;
+           the player can still move into the close tactical range with the
+           wheel. */
+        var outerRadius = pv.radius + 6;
+        var halfAngle = Math.min(R.cam.fov / 2, Math.atan(Math.tan(R.cam.fov / 2) * aspect));
+        d = Math.max(outerRadius * 3.8, outerRadius / Math.sin(halfAngle) * 1.18);
         pPitch = 0.18;
       } else {
         d = Math.max(d, pv.radius * 0.80);
@@ -9843,7 +10100,8 @@ var GAME = (function () {
       }
     }
     if (keepUserZoom) {
-      cam.targetDist = Math.min(cam.targetDist, d);
+      var zoomRatio = cam.fitDist ? cam.targetDist / cam.fitDist : 1;
+      cam.targetDist = cam.dist = d * zoomRatio;
     } else {
       cam.targetDist = cam.dist = d;
       cam.targetYaw = cam.yaw = 0;
@@ -9852,6 +10110,7 @@ var GAME = (function () {
       cam.targetFocus = [0, 0, 0];
     }
     cam.fitDist = d;
+    R.cam.far = Math.max(260, d * 1.5 + (pv ? pv.radius * 2 : 0));
   }
 
   /* Board meshes belong to a RUN, not to the cache, because the board changes
@@ -9923,12 +10182,21 @@ var GAME = (function () {
       R.ART.ambient = fullGlobe ? 0.42 : 0.36;
       R.ART.shadowLift = fullGlobe ? 0.38 : 0.34;
       R.ART.planetFill = fullGlobe ? 0.90 : 1.15;
+      R.ART.canvas = fullGlobe ? 0.05 : 0.30;
+      R.ART.inkStrength = fullGlobe ? 0.48 : 1.20;
       /* THE METAL BACKING CAP, armed for planet boards (see 05-render
          resize: backing > ~1600 kills the opaque pass on real Metal).
          RESIZE IS FORCED NOW: the boot-time resize ran before maxW was set,
          so arming the cap without re-sizing left the backing in the dead
          zone (measured W 1814). */
       R.quality.maxW = 1600;
+      /* RETINA MARGIN. On real Metal hardware the max-survey zoom blackens
+         out; the boundary was measured between 0.62 and 0.85 scale and the
+         cap at 0.85 keeps the common window in the proven range. Apply the
+         scale before resize so the render targets and the reported scale
+         cannot disagree for the entire run. */
+      R.quality.scale = Math.min(R.quality.scale, 0.85);
+      R.adaptive.max = 0.85;
       resize();
       /* PLANET COLOR BOOST. The camera-facing hemisphere of a globe is a night
          face, so the ramp's lit/mid stops lift here (bright mean AND a wider
@@ -9937,13 +10205,6 @@ var GAME = (function () {
          branch, so flat plates are byte-for-byte unchanged. */
       R.ART.planetBoost = fullGlobe ? 0.15 : 0.90;
       R.ART.exposure = fullGlobe ? 1.04 : 1.14;
-      /* RETINA MARGIN. On real Metal hardware the max-survey zoom blackens
-         out; the boundary was measured between 0.62 and 0.85 scale and the
-         cap at 0.85 keeps the common window in the proven range. (A 0.62
-         cap did not cure the survey case; it only cost sharpness - this
-         defect is tracked separately below.) */
-      R.quality.scale = Math.min(R.quality.scale, 0.85);
-      R.adaptive.max = 0.85;
       /* THE DIORAMA SHADOW LAW. The sun follows the camera on a globe, so
          the shadow map's viewpoint is the camera: the FAR hemisphere
          occludes the NEAR one and blacks out exactly the face the player
@@ -9962,11 +10223,17 @@ var GAME = (function () {
       R.ART.ambient = 0.28;
       R.ART.shadowLift = 0.30;
       R.ART.planetFill = 0.0;
+      R.ART.canvas = 0.30;
+      R.ART.inkStrength = 1.20;
       R.ART.planetBoost = 0.0;
       R.ART.exposure = 1.00;
       R.quality.shadows = true;
       R.adaptive.max = 1.0;
       R.quality.maxW = 0;
+      /* A previous planet run may have left capped render targets behind.
+         Rebuild them for the flat-board quality range immediately rather
+         than waiting for the adaptive cooldown to happen to resize. */
+      resize();
     }
     R.sun.distance = Math.max(90, R.sun.extent * 2.1);
 
@@ -10037,7 +10304,7 @@ var GAME = (function () {
       var pv = G && G.board && G.board.surf;
       var hi = (cam.fitDist || 160) * 1.15;
       var lo = 26;
-      if (pv && pv.mode === 'band') { lo = pv.radius * 1.45; hi = pv.radius * 5.2; }
+      if (pv && pv.mode === 'band') { lo = pv.radius * 1.45; hi = Math.max(pv.radius * 5.2, cam.fitDist * 1.25); }
       else if (pv) { lo = Math.max(26, pv.radius * 1.15); hi = Math.max(hi, pv.radius * 1.6); }
       cam.targetDist = U.clamp(cam.targetDist * (1 + Math.sign(e.deltaY) * 0.10), lo, hi);
     }, { passive: false });
@@ -10075,7 +10342,7 @@ var GAME = (function () {
         if (touchDist > 0) {
           var pv2 = G && G.board && G.board.surf;
           var hi2 = (cam.fitDist || 160) * 1.15, lo2 = 26;
-          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.45; hi2 = pv2.radius * 5.2; }
+          if (pv2 && pv2.mode === 'band') { lo2 = pv2.radius * 1.45; hi2 = Math.max(pv2.radius * 5.2, cam.fitDist * 1.25); }
           cam.targetDist = U.clamp(cam.targetDist * (touchDist / d), lo2, hi2);
         }
         touchDist = d;
@@ -10519,6 +10786,10 @@ var GAME = (function () {
     var pal = PAINT.FACTIONS[G.enemyFaction] || PAINT.FACTIONS.xeno;
     for (var i = 0; i < G.denizens.length; i++) {
       var d = G.denizens[i];
+      if (!globeVisible(d.pos[0], d.pos[2], Math.max(4, d.scale * 3.5 + d.pos[1]))) {
+        stats.culledDenizens++;
+        continue;
+      }
       var rig = rigFor(d);
       var dying = !d.alive && d.dying > 0;
 
@@ -10616,6 +10887,10 @@ var GAME = (function () {
     var pal = R.palette();
     for (var i = 0; i < G.towers.length; i++) {
       var t = G.towers[i];
+      if (!globeVisible(t.pos[0], t.pos[2], 7)) {
+        stats.culledTowers++;
+        continue;
+      }
       var model = MODELS.tower(t.id, t.tier);
       var def = DATA.TOWERS[t.id];
       var s = SIM.stats(t);
@@ -10638,7 +10913,7 @@ var GAME = (function () {
         var ty = t.pos[1] + model.turretY + rise;
         var spin = def.kind === 'support' ? t.spin : 0;
         R.push(model.turret,
-          U.m4trs(tx, ty, tz, 0, t.yaw + spin, 0, bs, bs, bs),
+          surfM(tx, ty, tz, t.yaw + spin, bs, bs, bs),
           { dissolve: (1 - b) * 0.55 });
         if (model.barrel) {
           /* The barrel recoils further than the turret, and CYCLONE's fan
@@ -10648,7 +10923,8 @@ var GAME = (function () {
           var bz = t.pos[2] - Math.cos(t.yaw) * brec;
           var barrelSpin = t.id === 'cyclone' ? t.spin : 0;
           R.push(model.barrel,
-            U.m4trs(bx, ty, bz, 0, t.yaw, barrelSpin, bs, bs, bs),
+            U.m4mul(surfM(bx, ty, bz, t.yaw, bs, bs, bs),
+              U.m4trs(0, 0, 0, 0, 0, barrelSpin, 1, 1, 1), U.m4ident()),
             { dissolve: (1 - b) * 0.55 });
         }
       }
@@ -10767,6 +11043,10 @@ var GAME = (function () {
   function drawProjectiles() {
     for (var i = 0; i < G.projs.length; i++) {
       var p = G.projs[i];
+      if (!globeVisible(p.pos[0], p.pos[2], Math.max(4, p.pos[1] * 1.5 + 2))) {
+        stats.culledProjectiles++;
+        continue;
+      }
       var el = DATA.ELEMENTS[p.element];
       var col = el ? el.color : '#ffffff';
       var mesh = MODELS.projectile(p.splash > 0 ? 'shell' : 'bolt', col);
@@ -10802,7 +11082,8 @@ var GAME = (function () {
       facetJitter: globeGround ? 0.10 : 0.26,
       rimScale: globeGround ? 0.10 : 0.18,
       bandCap: groundBandCap,
-      sphereNormal: globeGround ? 1.0 : 0.0
+      sphereNormal: globeGround ? 0.22 : 0.0,
+      terrainRadius: globeGround ? G.board.surf.radius : 0
     });
     /* The planet body sits UNDER the play surface and closes the globe. */
     if (G.planetBodyMesh) {
@@ -10826,15 +11107,20 @@ var GAME = (function () {
       var cy = G.time * 1.35;
       for (var cd = 6; cd < G.board.path.length - 6; cd += 6) {
         var cp2 = G.board.pathAt(cd);
+        if (!globeVisible(cp2.pos[0], cp2.pos[2], 3)) continue;
         var cyaw = Math.atan2(cp2.dir[0], cp2.dir[2]);
         var pulse = 0.46 + 0.50 * (0.5 + 0.5 * Math.sin(cy * 2 - cd * 0.5));
         R.pushUnlit(G.chevronMesh,
-          surfM(cp2.pos[0], cp2.pos[1] + 0.55, cp2.pos[2], cyaw, 1.05, 1.05, 1.05),
+          surfM(cp2.pos[0], G.board.heightAt(cp2.pos[0], cp2.pos[2]) + 0.25, cp2.pos[2], cyaw, 0.55, 0.55, 0.55),
           { tint: pal.rim, alpha: pulse, additive: true, pulse: pulse * 0.6 });
       }
     }
-    R.push(G.spawnMesh, surfM(sp[0], G.board.heightAt(sp[0], sp[2]) - 0.3, sp[2], 0, 1, 1, 1));
-    R.push(G.goalMesh, surfM(gl[0], G.board.heightAt(gl[0], gl[2]) - 0.2, gl[2], 0, 1, 1, 1));
+    if (globeVisible(sp[0], sp[2], 7)) {
+      R.push(G.spawnMesh, surfM(sp[0], G.board.heightAt(sp[0], sp[2]) - 0.3, sp[2], 0, 1, 1, 1));
+    }
+    if (globeVisible(gl[0], gl[2], 7)) {
+      R.push(G.goalMesh, surfM(gl[0], G.board.heightAt(gl[0], gl[2]) - 0.2, gl[2], 0, 1, 1, 1));
+    }
 
     /* GOAL BEACON (curved boards). A tall additive light column rising off
        the surface at the goal, so the objective stays findable from any
@@ -10843,7 +11129,7 @@ var GAME = (function () {
        camera needs when the goal is on the far side or around the curve.
        Width stays near the gameplay-beam range (0.09..0.22); anything wider
        reads as a solid mountain instead of a shaft. */
-    if (G.board.surf) {
+    if (G.board.surf && globeVisible(gl[0], gl[2], 30)) {
       var gb = G.board.surf.world(gl[0], 0.6, gl[2]);
       var gn = G.board.surf.normalAt(gl[0], gl[2]);
       var gt = [gb[0] + gn[0] * 26, gb[1] + gn[1] * 26, gb[2] + gn[2] * 26];
@@ -10855,9 +11141,11 @@ var GAME = (function () {
     /* The goal pulses harder as lives drop, which is a readable panic signal
        that costs nothing and needs no UI. */
     var danger = 1 - G.lives / G.maxLives;
-    R.pushUnlit(G.rangeRing,
-      surfM(gl[0], G.board.heightAt(gl[0], gl[2]) + 0.15, gl[2], G.time * 0.5, 4.5, 1, 4.5),
-      { tint: danger > 0.5 ? [1, 0.3, 0.35] : pal.rim, alpha: 0.4 + danger * 0.4, additive: true, pulse: 0.6 + danger });
+    if (globeVisible(gl[0], gl[2], 7)) {
+      R.pushUnlit(G.rangeRing,
+        surfM(gl[0], G.board.heightAt(gl[0], gl[2]) + 0.15, gl[2], G.time * 0.5, 4.5, 1, 4.5),
+        { tint: danger > 0.5 ? [1, 0.3, 0.35] : pal.rim, alpha: 0.4 + danger * 0.4, additive: true, pulse: 0.6 + danger });
+    }
 
     /* Build plots stay as faint hardware hints (free-form placement uses the
        cursor, not the plot list). */
@@ -10867,6 +11155,7 @@ var GAME = (function () {
       for (var i = 0; i < G.board.plots.length; i++) {
         var p = G.board.plots[i];
         if (p.tower) continue;
+        if (!globeVisible(p.x, p.z, 3)) continue;
         R.pushUnlit(G.plotRing,
           surfM(p.x, p.y + 0.12, p.z, 0.4, 1.5, 1, 1.5),
           { tint: pal.keyRgb, alpha: 0.10, additive: true });
@@ -10910,6 +11199,7 @@ var GAME = (function () {
       var dt = (now - lastT) / 1000;
       lastT = now;
       if (!isFinite(dt) || dt < 0) dt = 1 / 60;
+      var cadenceMs = dt * 1000;
       /* Clamped: see the header note on backgrounded tabs. */
       dt = Math.min(dt, 0.25);
 
@@ -10960,6 +11250,9 @@ var GAME = (function () {
       if (G) {
         updateCamera(dt);
         updateHover();
+        stats.culledDenizens = 0;
+        stats.culledTowers = 0;
+        stats.culledProjectiles = 0;
         R.reset();
         drawBoard();
         drawTowers();
@@ -10967,12 +11260,15 @@ var GAME = (function () {
         drawProjectiles();
         FX.submit();
         R.render(dt);
+        stats.drawCalls = R.prof.draws + R.prof.shadowDraws;
+        stats.tris = R.prof.tris;
         UI.tickOverlay(dt);
       }
       stats.particles = FX.count;
       stats.frameMs = U.nowMs() - t0;
+      stats.frameIntervalMs = cadenceMs;
       /* The renderer owns the decision; the loop only reports the measurement. */
-      R.tickAdaptive(stats.frameMs);
+      R.tickAdaptive(stats.frameMs, cadenceMs);
       stats.renderScale = R.quality.scale;
     } catch (e) {
       recordError('frame', e);
@@ -11042,9 +11338,12 @@ var GAME = (function () {
      in that category. */
   function renderOnce(dt) {
     if (!G) return false;
-    dt = dt || (1 / 60);
+    dt = dt === undefined ? (1 / 60) : dt;
     try {
       updateCamera(dt);
+      stats.culledDenizens = 0;
+      stats.culledTowers = 0;
+      stats.culledProjectiles = 0;
       R.reset();
       drawBoard();
       drawTowers();
@@ -11052,6 +11351,8 @@ var GAME = (function () {
       drawProjectiles();
       FX.submit();
       R.render(dt);
+      stats.drawCalls = R.prof.draws + R.prof.shadowDraws;
+      stats.tris = R.prof.tris;
       return true;
     } catch (e) {
       recordError('renderOnce', e);
@@ -11071,6 +11372,7 @@ var GAME = (function () {
     get paused() { return paused; },
     set paused(v) { paused = v; },
     cam: cam, input: input, stats: stats,
+    isWorldVisible: globeVisible,
     errors: function () { return errors.slice(); }
   };
 })();
@@ -11565,7 +11867,8 @@ var UI = (function () {
     var used = 0;
     for (var t = 0; t < texts.length; t++) {
       var f = texts[t];
-      var p = R.project([f.x, f.y, f.z]);
+      if (!GAME.isWorldVisible(f.x, f.z, Math.max(4, f.y + 2))) continue;
+      var p = R.project(G.board.surf ? G.board.surf.world(f.x, f.y, f.z) : [f.x, f.y, f.z]);
       if (!p) continue;
       var node = floatPool[used];
       if (!node) {
@@ -11599,7 +11902,9 @@ var UI = (function () {
     for (var bi = 0; bi < G.denizens.length; bi++) {
       var dn = G.denizens[bi];
       if (!dn.alive || dn.hp >= dn.maxHp - 0.5) continue;
-      var bp = R.project([dn.pos[0], dn.pos[1] + 2.35 * dn.scale, dn.pos[2]]);
+      if (!GAME.isWorldVisible(dn.pos[0], dn.pos[2], Math.max(4, dn.scale * 4))) continue;
+      var head = [dn.pos[0], dn.pos[1] + 2.35 * dn.scale, dn.pos[2]];
+      var bp = R.project(G.board.surf ? G.board.surf.world(head[0], head[1], head[2]) : head);
       if (!bp) continue;
       var bar = barPool[bars];
       if (!bar) {
@@ -11828,6 +12133,7 @@ var UI = (function () {
        ships has proved something about a program nobody plays. */
     window.__RQ = {
       version: '1.0.0',
+      planetBuild: '19-canyon',
 
       ready: function () {
         return !!(GAME && UI && R && R.caps());
@@ -11942,6 +12248,61 @@ var UI = (function () {
           minArea2: isFinite(minArea2) ? +minArea2.toFixed(6) : null,
           hasInnerBody: !!G.board.planetBody
         };
+      },
+
+      /* Reproducible frame evidence for browser and device checks. CPU time
+         is command submission, GPU time is the asynchronous timer-query
+         result, and frameInterval is delivered cadence. Keeping the three
+         separate prevents a fast JavaScript number from being mistaken for
+         a fast rendered frame. */
+      performanceReport: function () {
+        var cv = document.getElementById('gl');
+        var rs = R.stats();
+        var passMs = {};
+        for (var k in rs.ms) if (k.charAt(0) !== '_') passMs[k] = rs.ms[k];
+        return {
+          fps: +GAME.stats.fps.toFixed(2),
+          cpuMs: +GAME.stats.frameMs.toFixed(3),
+          frameIntervalMs: +GAME.stats.frameIntervalMs.toFixed(3),
+          gpuMs: rs.gpuMs === null ? null : +rs.gpuMs.toFixed(3),
+          gpuLastMs: rs.gpuLastMs === null ? null : +rs.gpuLastMs.toFixed(3),
+          gpuAvailable: rs.gpuAvailable,
+          gpuAge: rs.gpuAge,
+          adaptive: {
+            source: R.adaptive.source || 'cpu',
+            sampleMs: +(R.adaptive.sample || 0).toFixed(3),
+            averageMs: +R.adaptive.avg.toFixed(3),
+            targetMs: +R.adaptive.target.toFixed(3)
+          },
+          resolution: {
+            cssW: R.adaptive.cssW,
+            cssH: R.adaptive.cssH,
+            backingW: cv ? cv.width : 0,
+            backingH: cv ? cv.height : 0,
+            sceneW: R.W,
+            sceneH: R.H,
+            scale: +R.quality.scale.toFixed(3)
+          },
+          work: {
+            globeCulling: R.quality.globeCulling !== false,
+            draws: rs.draws + rs.shadowDraws,
+            shadowDraws: rs.shadowDraws,
+            triangles: Math.round(rs.tris),
+            opaqueItems: rs.opaqueItems,
+            transparentItems: rs.transparentItems,
+            submittedParticles: rs.particles,
+            liveParticles: FX.count,
+            culledDenizens: GAME.stats.culledDenizens,
+            culledTowers: GAME.stats.culledTowers,
+            culledProjectiles: GAME.stats.culledProjectiles
+          },
+          passCpuMs: passMs
+        };
+      },
+
+      setProfiling: function (v) {
+        R.setProfiling(v !== false);
+        return this.performanceReport();
       },
 
       /* Build a tower on the Nth free plot. Returns the tower id or null. */
