@@ -31,12 +31,14 @@ keep a stable identity and shrink in count toward the poles to avoid
 pinched texture noise. World-space paint tooth and radial rock strata
 remain attached to the surface during orbit.
 
-Build `19-canyon` adds a periodic 241x121 height field, with elevations
+Build `19-canyon-stable-light` adds a periodic 241x121 height field, with elevations
 from -1.37 to +3.62 world units. The entire route follows the recessed
 floor; terrain selection intersects that height field rather than the old
 base sphere. Displaced face normals blended 22% toward radial normals
 light the rock slopes. Globe-only ink is 0.48, canvas is 0.05, exposure is
 1.04, and wet terrain highlights are reduced to 6% of the model strength.
+Terrain uses a continuous fixed-sun diffuse response instead of random
+per-triangle cel-band snapping, preventing shaded-side speckle during orbit.
 Turrets and barrels use the same surface frame as their bases.
 
 The shell has 81,920 triangles, 245,760 vertices, no degenerate or inward

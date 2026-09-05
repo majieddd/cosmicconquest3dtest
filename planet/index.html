@@ -2545,6 +2545,11 @@ var SH = (function () {
        smoothly. That keeps the cel edge intact inside shadows, which is where
        most cel-shaded renderers give themselves away. */
     '  float lit = posterise(ndlL * mix(0.25, 1.0, sh), vSeed);',
+    /* Dense terrain already has authored paint cells and sculpted normals.
+       Random quantised bands make sub-pixel faces sparkle during orbit.
+       Use a continuous, fixed-sun response for terrain only; actors retain
+       the cel ramp. No camera-facing fill enters the ground's diffuse term. */
+    '  if (uItemC.z > 0.5) lit = 0.24 + 0.26 * smoothstep(-0.9, 0.65, ndl);',
     '  lit = min(lit, uItemC.x);',
     '  vec3 col = rampColor(lit, vAlbedo);',
     '',
@@ -12133,7 +12138,7 @@ var UI = (function () {
        ships has proved something about a program nobody plays. */
     window.__RQ = {
       version: '1.0.0',
-      planetBuild: '19-canyon',
+      planetBuild: '19-canyon-stable-light',
 
       ready: function () {
         return !!(GAME && UI && R && R.caps());
